@@ -399,6 +399,13 @@ tutorial <functions>` for more information.
      - |affine| log-log affine
      - |incr| incr.
 
+   * - :ref:`cumprod(X, axis=0) <cumprod>`
+
+     - cumulative product along given axis.
+     - :math:`X \in \mathbf{R}^{m \times n}`
+     - |affine| log-log affine
+     - |incr| incr.
+
    * - :ref:`quad_form(x, P) <quad-form>`
      - :math:`x^T P x`
      - :math:`x \in \mathbf{R}^n`, :math:`P \in \mathbf{R}^{n \times n}_{++}`
@@ -547,6 +554,13 @@ dimensions or be scalars, which are promoted.
      - :math:`x^2`
      - :math:`x > 0`
      - |affine| log-log affine
+     - |incr| incr.
+
+   * - :ref:`xexp(x) <xexp>`
+
+     - :math:`x e^x`
+     - :math:`x > 0`
+     - |convex| log-log convex
      - |incr| incr.
 
 Vector/matrix functions

@@ -13,10 +13,11 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-from typing import List, Optional, Tuple
+from __future__ import annotations
 
 import cvxpy.lin_ops.lin_utils as lu
 from cvxpy import settings as s
+from cvxpy.expressions.expression import Expression, GradMap
 from cvxpy.expressions.leaf import Leaf
 from cvxpy.utilities import scopes
 
@@ -44,8 +45,18 @@ class Parameter(Leaf):
     PARAM_COUNT = 0
 
     def __init__(
-        self, shape: Tuple[int, ...] = (), name: Optional[str] = None, value=None, id=None, **kwargs
+        self, shape: int | tuple[int, ...] = (), name: str | None = None, value=None,
+        id=None, **kwargs
     ) -> None:
+        bounds = kwargs.get('bounds')
+        if bounds is not None:
+            for b in bounds:
+                if isinstance(b, Expression):
+                    raise ValueError(
+                        "Parameter bounds must be numeric, not CVXPY "
+                        "Expressions. Parametric bounds are only "
+                        "supported on Variables."
+                    )
         if id is None:
             self.id = lu.get_id()
         else:
@@ -74,19 +85,8 @@ class Parameter(Leaf):
             return False
         return True
 
-    # Getter and setter for parameter value.
     @property
-    def value(self):
-        """NumPy.ndarray or None: The numeric value of the parameter.
-        """
-        return self._value
-
-    @value.setter
-    def value(self, val):
-        self._value = self._validate_value(val)
-
-    @property
-    def grad(self):
+    def grad(self) -> GradMap:
         """Gives the (sub/super)gradient of the expression w.r.t. each variable.
 
         Matrix expressions are vectorized, so the gradient is a matrix.
@@ -96,7 +96,7 @@ class Parameter(Leaf):
         """
         return {}
 
-    def parameters(self) -> List["Parameter"]:
+    def parameters(self) -> list[Parameter]:
         """Returns itself as a parameter.
         """
         return [self]

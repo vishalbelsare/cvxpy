@@ -14,55 +14,101 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from typing import List, Optional, Tuple
 
 import numpy as np
 import scipy.sparse as sp
 
 import cvxpy.interface as intf
 import cvxpy.lin_ops.lin_utils as lu
-import cvxpy.utilities.eigvals as eig_util
+import cvxpy.settings as s
+import cvxpy.utilities.linalg as eig_util
+from cvxpy.expressions.expression import ExpressionValue, GradMap
 from cvxpy.expressions.leaf import Leaf
-from cvxpy.settings import EIGVAL_TOL
 from cvxpy.utilities import performance_utils as perf
+from cvxpy.utilities.warn import warn
+
+NESTED_LIST_WARNING = "Initializing a Constant with a nested list is " \
+                      "undefined behavior. Consider using a numpy array instead."
 
 
 class Constant(Leaf):
     """
     A constant value.
 
-    Raw numerical constants (Python primite types, NumPy ndarrays,
-    and NumPy matrices) are implicitly cast to constants via Expression
-    operator overloading. For example, if ``x`` is an expression and
-    ``c`` is a raw constant, then ``x + c`` creates an expression by
-    casting ``c`` to a Constant.
+    Raw numerical constants such as Python primitive types or NumPy ndarrays
+    are implicitly cast to constants via Expression operator overloading.
+    For example, if ``x`` is an expression and``c`` is a raw constant,
+    then ``x + c`` creates an expression by casting ``c`` to a Constant.
     """
 
-    def __init__(self, value) -> None:
+    def __init__(self, value, name: str | None = None) -> None:
+        # Record whether the original value was boolean-typed before
+        # const_to_matrix converts it to float64.
+        self._boolean: bool = self._detect_boolean(value)
+        # When a dense input must be copied to give Constant snapshot semantics,
+        # retain its identity for structural canonicalization caches. This does
+        # not keep the caller's array alive or expose it as our value.
+        self._value_source_id: int | None = None
         # Keep sparse matrices sparse.
         if intf.is_sparse(value):
             self._value = intf.DEFAULT_SPARSE_INTF.const_to_matrix(
                 value, convert_scalars=True)
+            # Defensively copy if the conversion aliased the caller's data,
+            # since sign/PSD attributes are cached against the value.
+            if hasattr(value, 'data') and hasattr(self._value, 'data') and \
+                    np.may_share_memory(self._value.data, value.data):
+                self._value = self._value.copy()
             self._sparse = True
         else:
+            if isinstance(value, list) and any(isinstance(i, list) for i in value):
+                warn(NESTED_LIST_WARNING)
+
             self._value = intf.DEFAULT_INTF.const_to_matrix(value)
+            if isinstance(value, np.ndarray) and np.may_share_memory(self._value, value):
+                self._value_source_id = id(value)
+                self._value = self._value.copy()
             self._sparse = False
-        self._imag: Optional[bool] = None
-        self._nonneg: Optional[bool] = None
-        self._nonpos: Optional[bool] = None
-        self._symm: Optional[bool] = None
-        self._herm: Optional[bool] = None
-        self._psd_test: Optional[bool] = None
-        self._nsd_test: Optional[bool] = None
+        self._imag: bool | None = None
+        self._nonneg: bool | None = None
+        self._nonpos: bool | None = None
+        self._symm: bool | None = None
+        self._herm: bool | None = None
+        self._psd_test: bool | None = None
+        self._nsd_test: bool | None = None
         self._cached_is_pos = None
+        self._skew_symm = None
+        self._name = name
         super(Constant, self).__init__(intf.shape(self.value))
 
-    def name(self) -> str:
-        """The value as a string.
-        """
-        return str(self.value)
+    @staticmethod
+    def _detect_boolean(value) -> bool:
+        """Check if the original value has boolean dtype."""
+        if isinstance(value, (bool, np.bool_)):
+            return True
+        if hasattr(value, 'dtype') and value.dtype == np.bool_:
+            return True
+        return False
 
-    def constants(self) -> List["Constant"]:
+    @property
+    def is_boolean_valued(self) -> bool:
+        """Whether this constant was constructed from a boolean-typed value."""
+        return self._boolean
+
+    def name(self) -> str:
+        """
+         The value of the constant as a string.
+        """
+        if self._name is None:
+            if len(self.shape) == 2 and "\n" in str(self.value):
+                return np.array2string(self.value,
+                                       edgeitems=s.PRINT_EDGEITEMS,
+                                       threshold=s.PRINT_THRESHOLD,
+                                       formatter={'float': lambda x: f'{x:.2f}'})
+            return str(self.value)
+        else:
+            return self._name
+
+    def constants(self) -> list["Constant"]:
         """Returns self as a constant.
         """
         return [self]
@@ -71,8 +117,8 @@ class Constant(Leaf):
         return True
 
     @property
-    def value(self):
-        """NumPy.ndarray or None: The numeric value of the constant.
+    def value(self) -> ExpressionValue:
+        """The numeric value of the constant.
         """
         return self._value
 
@@ -89,7 +135,7 @@ class Constant(Leaf):
         return self._cached_is_pos
 
     @property
-    def grad(self):
+    def grad(self) -> GradMap:
         """Gives the (sub/super)gradient of the expression w.r.t. each variable.
 
         Matrix expressions are vectorized, so the gradient is a matrix.
@@ -100,7 +146,7 @@ class Constant(Leaf):
         return {}
 
     @property
-    def shape(self) -> Tuple[int, ...]:
+    def shape(self) -> tuple[int, ...]:
         """Returns the (row, col) dimensions of the expression.
         """
         return self._shape
@@ -195,6 +241,11 @@ class Constant(Leaf):
         self._symm = is_symm
         self._herm = is_herm
 
+    def is_skew_symmetric(self) -> bool:
+        if self._skew_symm is None:
+            self._skew_symm = intf.is_skew_symmetric(self.value)
+        return self._skew_symm
+
     @perf.compute_once
     def is_psd(self) -> bool:
         """Is the expression a positive semidefinite matrix?
@@ -213,7 +264,7 @@ class Constant(Leaf):
 
         # Compute sign of bottom eigenvalue if absent.
         if self._psd_test is None:
-            self._psd_test = eig_util.is_psd_within_tol(self.value, EIGVAL_TOL)
+            self._psd_test = eig_util.is_psd_within_tol(self.value, s.EIGVAL_TOL)
 
         return self._psd_test
 
@@ -235,6 +286,20 @@ class Constant(Leaf):
 
         # Compute sign of top eigenvalue if absent.
         if self._nsd_test is None:
-            self._nsd_test = eig_util.is_psd_within_tol(-self.value, EIGVAL_TOL)
+            self._nsd_test = eig_util.is_psd_within_tol(-self.value, s.EIGVAL_TOL)
 
         return self._nsd_test
+
+    def get_bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return bounds for this constant.
+
+        For constants, the bounds are exactly (value, value).
+        Sparse matrices are returned as-is to avoid memory blowup.
+
+        Returns
+        -------
+        tuple of np.ndarray or sparse matrix
+            (lower_bound, upper_bound) equal to the constant's value.
+        """
+        val = self._value
+        return (val.copy(), val.copy())

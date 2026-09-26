@@ -15,7 +15,12 @@ limitations under the License.
 """
 from cvxpy import atoms
 from cvxpy.atoms.affine import binary_operators as bin_op
+from cvxpy.atoms.affine.diag import diag_vec
+from cvxpy.atoms.affine.promote import promote
+from cvxpy.atoms.affine.upper_tri import upper_tri
+from cvxpy.constraints.psd import PSD
 from cvxpy.expressions.constants.parameter import Parameter
+from cvxpy.expressions.variable import Variable
 
 
 # Sublevel sets for quasiconvex atoms.
@@ -29,10 +34,10 @@ def dist_ratio_sub(expr, t):
     b = expr.b
 
     def sublevel_set():
-        if t.value > 1:
+        if t.value is None or t.value > 1:
             return False
         tsq = t.value**2
-        return ((1-tsq**2)*atoms.sum_squares(x) -
+        return ((1-tsq)*atoms.sum_squares(x) -
                 atoms.matmul(2*(a-tsq*b), x) + atoms.sum_squares(a) -
                 tsq*atoms.sum_squares(b)) <= 0
     return [sublevel_set]
@@ -82,7 +87,7 @@ def length_sub(expr, t):
     arg = expr.args[0]
     if isinstance(t, Parameter):
         def sublevel_set():
-            if t.value < 0:
+            if t.value is None or t.value < 0:
                 return False
             if t.value >= arg.size:
                 return True
@@ -96,6 +101,8 @@ def sign_sup(expr, t):
     x = expr.args[0]
 
     def superlevel_set():
+        if t.value is None:
+            return False
         if t.value <= -1:
             return True
         elif t.value <= 1:
@@ -109,6 +116,8 @@ def sign_sub(expr, t):
     x = expr.args[0]
 
     def sublevel_set():
+        if t.value is None:
+            return False
         if t.value >= 1:
             return True
         elif t.value >= -1:
@@ -124,6 +133,22 @@ def gen_lambda_max_sub(expr, t):
             (t * expr.args[1] - expr.args[0] >> 0)]
 
 
+def condition_number_sub(expr, t):
+    A = expr.args[0]
+    n = A.shape[0]
+    u = Variable(pos=True)
+
+    prom_ut = promote(u * t, (n,))
+    prom_u = promote(u, (n,))
+    tmp_expr1 = A - diag_vec(prom_u)
+    tmp_expr2 = diag_vec(prom_ut) - A
+
+    return [upper_tri(A) == upper_tri(A.T),
+            PSD(A),
+            PSD(tmp_expr1),
+            PSD(tmp_expr2)]
+
+
 SUBLEVEL_SETS = {
     atoms.multiply: mul_sub,
     bin_op.DivExpression: ratio_sub,
@@ -131,6 +156,7 @@ SUBLEVEL_SETS = {
     atoms.sign: sign_sub,
     atoms.dist_ratio: dist_ratio_sub,
     atoms.gen_lambda_max: gen_lambda_max_sub,
+    atoms.condition_number: condition_number_sub,
 }
 
 

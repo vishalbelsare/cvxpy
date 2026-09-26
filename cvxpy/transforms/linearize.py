@@ -41,7 +41,7 @@ def linearize(expr):
     Returns:
         An affine expression or None.
     """
-    expr = Constant.cast_to_const(expr)
+    expr = Constant.cast(expr)
     if expr.is_affine():
         return expr
     else:
@@ -55,8 +55,8 @@ def linearize(expr):
             if grad_map[var] is None:
                 return None
             elif var.is_matrix():
-                flattened = Constant(grad_map[var]).T @ vec(var - var.value)
-                tangent = tangent + reshape(flattened, expr.shape)
+                flattened = Constant(grad_map[var]).T @ vec(var - var.value, order='F')
+                tangent = tangent + reshape(flattened, expr.shape, order='F')
             else:
                 tangent = tangent + Constant(grad_map[var]).T @ (var - var.value)
         return tangent

@@ -35,34 +35,33 @@ def warnings_enabled() -> bool:
 class SolverError(Exception):
     """Error thrown when a solver encounters an error solving a problem.
     """
-    pass
 
 
 class DCPError(Exception):
     """Error thrown for DCP violations.
     """
-    pass
+
+
+class DNLPError(Exception):
+    """Error thrown for DNLP violations.
+    """
 
 
 class DPPError(Exception):
     """Error thrown for DPP violations.
     """
-    pass
 
 
 class DGPError(Exception):
     """Error thrown for DGP violations.
     """
-    pass
 
 
 class DQCPError(Exception):
     """Error thrown for DQCP violations.
     """
-    pass
 
 
 class ParameterError(Exception):
     """Error thrown for accessing the value of an unspecified parameter.
     """
-    pass

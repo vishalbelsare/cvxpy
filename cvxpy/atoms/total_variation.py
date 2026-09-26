@@ -21,7 +21,7 @@ from cvxpy.atoms.norm import norm
 from cvxpy.expressions.expression import Expression
 
 
-def tv(value, *args):
+def tv(value, *args) -> Expression:
     """Total variation of a vector, matrix, or list of matrices.
 
     Uses L1 norm of discrete gradients for vectors and
@@ -31,7 +31,7 @@ def tv(value, *args):
     ----------
     value : Expression or numeric constant
         The value to take the total variation of.
-    args : Matrix constants/expressions
+    *args : Matrix constants/expressions
         Additional matrices extending the third dimension of value.
 
     Returns
@@ -39,16 +39,16 @@ def tv(value, *args):
     Expression
         An Expression representing the total variation.
     """
-    value = Expression.cast_to_const(value)
+    value = Expression.cast(value)
     if value.ndim == 0:
         raise ValueError("tv cannot take a scalar argument.")
     # L1 norm for vectors.
     elif value.ndim == 1:
         return norm(value[1:] - value[0:value.shape[0]-1], 1)
     # L2 norm for matrices.
-    else:
+    elif value.ndim == 2:
         rows, cols = value.shape
-        args = map(Expression.cast_to_const, args)
+        args = map(Expression.cast, args)
         values = [value] + list(args)
         diffs = []
         for mat in values:
@@ -57,5 +57,7 @@ def tv(value, *args):
                 mat[1:rows, 0:cols-1] - mat[0:rows-1, 0:cols-1],
             ]
         length = diffs[0].shape[0]*diffs[1].shape[1]
-        stacked = vstack([reshape(diff, (1, length)) for diff in diffs])
+        stacked = vstack([reshape(diff, (1, length), order='F') for diff in diffs])
         return sum(norm(stacked, p=2, axis=0))
+    else:
+        raise ValueError("tv cannot have input arrays with more than 2 dimensions.")

@@ -47,8 +47,8 @@ following:
 * Read the CVXPY source and enhance the documentation, or address TODOs
 * Browse the [issue tracker](https://github.com/cvxpy/cvxpy/issues), and
   look for the issues tagged "help wanted".
-* Polish the [example library](https://www.cvxpy.org/examples/index.html) or add new examples
-* Add a [benchmark](https://github.com/cvxpy/cvxpy/tree/master/cvxpy/tests/test_benchmarks.py)
+* Polish the [example library](https://www.cvxpy.org/examples/index.html) or add new examples to the [examples repository](https://github.com/cvxpy/examples)
+* Add a [benchmark](https://github.com/cvxpy/benchmarks)
 
 ## License
 Please add the following license to new files:
@@ -72,23 +72,22 @@ limitations under the License.
 ```
 
 ## Code style
-We use [flake8](https://flake8.pycqa.org/en/latest/) and [isort](https://pycqa.github.io/isort/) to enforce our Python coding
-style. Before sending us a pull request, navigate to the project root
-and run
+We use [ruff](https://docs.astral.sh/ruff/) to enforce our Python coding style. Before sending us a pull request, navigate to the project root and run
 
 ```
-flake8 cvxpy/
-isort .
+pip install ruff
+ruff check cvxpy
 ```
 
-to make sure that your changes abide by our style conventions. Please fix any
-errors that are reported before sending the pull request.
+to make sure that your changes abide by our style conventions. Please fix any errors that are reported before sending the pull request.
 
 Optionally, the package [pre-commit](https://pre-commit.com/) can be installed to check these conventions automatically before every commit.
 ```
 pip install pre-commit
 pre-commit install
 ```
+
+Note on isort: if you see files changed by isort that you did not actively make changes to as part of your PR, it is an indication that the config was not picked up correctly. See [issue 1653](https://github.com/cvxpy/cvxpy/issues/1653) for details.
 
 ## Writing unit tests
 Most code changes will require new unit tests. (Even bug fixes require unit tests,
@@ -129,13 +128,17 @@ Please make sure that your change doesn't cause any of the unit tests to fail.
 to `pytest`.
 
 ## Benchmarks
-CVXPY has a few benchmarks in `cvxpy/tests/test_benchmarks.py`, which test
-the time to canonicalize problems. Please run
+CVXPY benchmarks are in a separate repository at 
+[github.com/cvxpy/benchmarks](https://github.com/cvxpy/benchmarks). 
+The benchmarks use [Airspeed Velocity](https://asv.readthedocs.io/) to test
+the time to canonicalize problems.
 
-```
-pytest -s test_benchmarks.py
-```
+To run benchmarks locally:
+1. Clone the benchmarks repository
+2. Install with `pip install -e .`
+3. Run benchmarks with `asv run`
 
-with and without your change, to make sure no performance regressions are
-introduced. If you are making a code contribution, please include the output of
-the above command (with and without your change) in your pull request.
+For more details, see the [benchmarks README](https://github.com/cvxpy/benchmarks/blob/main/README.md).
+
+When making performance-sensitive changes, please verify that no regressions are
+introduced by running the relevant benchmarks.

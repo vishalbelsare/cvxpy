@@ -21,17 +21,31 @@ import scipy as sp
 
 import cvxpy as cp
 from cvxpy import settings as s
+from cvxpy.atoms.affine.trace import trace
 from cvxpy.constraints.exponential import ExpCone
-from cvxpy.constraints.power import PowCone3D, PowConeND
+from cvxpy.constraints.power import PowCone3D, PowCone3DApprox, PowConeND
+from cvxpy.constraints.psd import PSD, SvecPSD
 from cvxpy.constraints.second_order import SOC
 from cvxpy.reductions.chain import Chain
 from cvxpy.reductions.cone2cone import affine2direct as a2d
+from cvxpy.reductions.cone2cone.approx import (
+    APPROX_CONE_CONVERSIONS,
+    ApproxCone2Cone,
+)
+from cvxpy.reductions.cone2cone.exact import (
+    EXACT_CONE_CONVERSIONS,
+    ExactCone2Cone,
+)
+from cvxpy.reductions.cone_format import format_cone_prog
 from cvxpy.reductions.cvx_attr2constr import CvxAttr2Constr
 from cvxpy.reductions.dcp2cone.cone_matrix_stuffing import ConeMatrixStuffing
 from cvxpy.reductions.dcp2cone.dcp2cone import Dcp2Cone
+from cvxpy.reductions.solution import Solution
+from cvxpy.reductions.solvers.conic_solvers.clarabel_conif import (
+    CLARABEL as ClarabelSolver,
+)
 from cvxpy.reductions.solvers.conic_solvers.conic_solver import ConicSolver
-from cvxpy.reductions.solvers.defines import (
-    INSTALLED_MI_SOLVERS as INSTALLED_MI,)
+from cvxpy.reductions.solvers.defines import INSTALLED_MI_SOLVERS as INSTALLED_MI
 from cvxpy.reductions.solvers.defines import MI_SOCP_SOLVERS as MI_SOCP
 from cvxpy.tests import solver_test_helpers as STH
 from cvxpy.tests.base_test import BaseTest
@@ -48,7 +62,7 @@ class TestDualize(BaseTest):
 
         # Dualize the problem, reconstruct a high-level cvxpy problem for the dual.
         # Solve the problem, invert the dualize reduction.
-        cone_prog = ConicSolver().format_constraints(cone_prog, exp_cone_order=[0, 1, 2])
+        cone_prog = format_cone_prog(cone_prog, exp_cone_order=[0, 1, 2])
         data, inv_data = a2d.Dualize.apply(cone_prog)
         A, b, c, K_dir = data[s.A], data[s.B], data[s.C], data['K_dir']
         y = cp.Variable(shape=(A.shape[1],))
@@ -88,7 +102,7 @@ class TestDualize(BaseTest):
         if K_dir[a2d.DUAL_POW3D]:
             dual_prims[a2d.DUAL_POW3D] = dual_prims[a2d.DUAL_POW3D].value
         dual_duals = {s.EQ_DUAL: constraints[0].dual_value}
-        dual_sol = cp.Solution(dual_prob.status, dual_prob.value, dual_prims, dual_duals, dict())
+        dual_sol = Solution(dual_prob.status, dual_prob.value, dual_prims, dual_duals, dict())
         cone_sol = a2d.Dualize.invert(dual_sol, inv_data)
 
         # Pass the solution back up the solving chain.
@@ -204,10 +218,10 @@ class TestSlacks(BaseTest):
 
         # apply the Slacks reduction, reconstruct a high-level problem,
         # solve the problem, invert the reduction.
-        cone_prog = ConicSolver().format_constraints(cone_prog, exp_cone_order=[0, 1, 2])
+        cone_prog = format_cone_prog(cone_prog, exp_cone_order=[0, 1, 2])
         data, inv_data = a2d.Slacks.apply(cone_prog, affine)
         G, h, f, K_dir, K_aff = data[s.A], data[s.B], data[s.C], data['K_dir'], data['K_aff']
-        G = sp.sparse.csc_matrix(G)
+        G = sp.sparse.csc_array(G)
         y = cp.Variable(shape=(G.shape[1],))
         objective = cp.Minimize(f @ y)
         aff_con = TestSlacks.set_affine_constraints(G, h, y, K_aff)
@@ -217,7 +231,7 @@ class TestSlacks(BaseTest):
         slack_prob = cp.Problem(objective, constraints)
         slack_prob.solve(**solve_kwargs)
         slack_prims = {a2d.FREE: y[:cone_prog.x.size].value}  # nothing else need be populated.
-        slack_sol = cp.Solution(slack_prob.status, slack_prob.value, slack_prims, None, dict())
+        slack_sol = Solution(slack_prob.status, slack_prob.value, slack_prims, None, dict())
         cone_sol = a2d.Slacks.invert(slack_sol, inv_data)
 
         # pass solution up the solving chain
@@ -290,7 +304,7 @@ class TestSlacks(BaseTest):
         # typical LP
         sth = STH.lp_2()
         for affine in TestSlacks.AFF_LP_CASES:
-            TestSlacks.simulate_chain(sth.prob, affine, solver='ECOS')
+            TestSlacks.simulate_chain(sth.prob, affine, solver='CLARABEL')
             sth.verify_objective(places=4)
             sth.verify_primal_values(places=4)
 
@@ -298,41 +312,41 @@ class TestSlacks(BaseTest):
         # unbounded LP
         sth = STH.lp_3()
         for affine in TestSlacks.AFF_LP_CASES:
-            TestSlacks.simulate_chain(sth.prob, affine, solver='ECOS')
+            TestSlacks.simulate_chain(sth.prob, affine, solver='CLARABEL')
             sth.verify_objective(places=4)
 
     def test_lp_4(self):
         # infeasible LP
         sth = STH.lp_4()
         for affine in TestSlacks.AFF_LP_CASES:
-            TestSlacks.simulate_chain(sth.prob, affine, solver='ECOS')
+            TestSlacks.simulate_chain(sth.prob, affine, solver='CLARABEL')
             sth.verify_objective(places=4)
 
     def test_socp_2(self):
         sth = STH.socp_2()
         for affine in TestSlacks.AFF_SOCP_CASES:
-            TestSlacks.simulate_chain(sth.prob, affine, solver='ECOS')
+            TestSlacks.simulate_chain(sth.prob, affine, solver='CLARABEL')
             sth.verify_objective(places=4)
             sth.verify_primal_values(places=4)
 
     def test_socp_3(self):
         for axis in [0, 1]:
             sth = STH.socp_3(axis)
-            TestSlacks.simulate_chain(sth.prob, [], solver='ECOS')
+            TestSlacks.simulate_chain(sth.prob, [], solver='CLARABEL')
             sth.verify_objective(places=4)
             sth.verify_primal_values(places=4)
 
     def test_expcone_1(self):
         sth = STH.expcone_1()
         for affine in TestSlacks.AFF_EXP_CASES:
-            TestSlacks.simulate_chain(sth.prob, affine, solver='ECOS')
+            TestSlacks.simulate_chain(sth.prob, affine, solver='CLARABEL')
             sth.verify_objective(places=4)
             sth.verify_primal_values(places=4)
 
     def test_expcone_socp_1(self):
         sth = STH.expcone_socp_1()
         for affine in TestSlacks.AFF_MIXED_CASES:
-            TestSlacks.simulate_chain(sth.prob, affine, solver='ECOS')
+            TestSlacks.simulate_chain(sth.prob, affine, solver='SCS')
             sth.verify_objective(places=4)
             sth.verify_primal_values(places=4)
 
@@ -350,10 +364,14 @@ class TestSlacks(BaseTest):
             sth.verify_objective(places=3)
             sth.verify_primal_values(places=3)
 
+    @pytest.mark.skipif(
+        "HIGHS" not in INSTALLED_MI,
+        reason='HiGHS solver is not installed.'
+    )
     def test_mi_lp_1(self):
         sth = STH.mi_lp_1()
         for affine in TestSlacks.AFF_LP_CASES:
-            TestSlacks.simulate_chain(sth.prob, affine, solver='ECOS_BB')
+            TestSlacks.simulate_chain(sth.prob, affine, solver=cp.HIGHS)
             sth.verify_objective(places=4)
             sth.verify_primal_values(places=4)
 
@@ -361,11 +379,11 @@ class TestSlacks(BaseTest):
     def test_mi_socp_1(self):
         sth = STH.mi_socp_1()
         for affine in TestSlacks.AFF_SOCP_CASES:
-            TestSlacks.simulate_chain(sth.prob, affine, solver='ECOS_BB')
+            TestSlacks.simulate_chain(sth.prob, affine, solver=cp.SCIPY)
             sth.verify_objective(places=4)
             sth.verify_primal_values(places=4)
 
-    @unittest.skipUnless([svr for svr in INSTALLED_MI if svr in MI_SOCP and svr != 'ECOS_BB'],
+    @unittest.skipUnless([svr for svr in INSTALLED_MI if svr in MI_SOCP],
                          'No appropriate mixed-integer SOCP solver is installed.')
     def test_mi_socp_2(self):
         sth = STH.mi_socp_2()
@@ -483,3 +501,849 @@ class TestPowND(BaseTest):
         sth.verify_primal_values(places=3)
         sth.check_complementarity(places=3)
         pass
+
+
+class TestRelEntrQuad(BaseTest):
+
+    def expcone_1(self) -> STH.SolverTestHelper:
+        """
+        min   3 * x[0] + 2 * x[1] + x[2]
+        s.t.  0.1 <= x[0] + x[1] + x[2] <= 1
+              x >= 0
+              and ...
+                x[0] >= x[1] * exp(x[2] / x[1])
+              equivalently ...
+                x[0] / x[1] >= exp(x[2] / x[1])
+                log(x[0] / x[1]) >= x[2] / x[1]
+                x[1] log(x[1] / x[0]) <= -x[2]
+        """
+        x = cp.Variable(shape=(3, 1))
+        cone_con = ExpCone(x[2], x[1], x[0]).as_quad_approx(5, 5)
+        constraints = [cp.sum(x) <= 1.0,
+                       cp.sum(x) >= 0.1,
+                       x >= 0,
+                       cone_con]
+        obj = cp.Minimize(3 * x[0] + 2 * x[1] + x[2])
+        obj_pair = (obj, 0.23534820622420757)
+        expect_exp = [np.array([-1.35348213]), np.array([-0.35348211]), np.array([0.64651792])]
+        con_pairs = [(constraints[0], 0),
+                     (constraints[1], 2.3534821130067614),
+                     (constraints[2], np.zeros(shape=(3, 1))),
+                     (constraints[3], expect_exp)]
+        expect_x = np.array([[0.05462721], [0.02609378], [0.01927901]])
+        var_pairs = [(x, expect_x)]
+        sth = STH.SolverTestHelper(obj_pair, var_pairs, con_pairs)
+        return sth
+
+    def test_expcone_1(self):
+        sth = self.expcone_1()
+        sth.solve(solver='CLARABEL')
+        sth.verify_primal_values(places=2)
+        sth.verify_objective(places=2)
+
+    def expcone_socp_1(self) -> STH.SolverTestHelper:
+        """
+        A random risk-parity portfolio optimization problem.
+        """
+        sigma = np.array([[1.83, 1.79, 3.22],
+                          [1.79, 2.18, 3.18],
+                          [3.22, 3.18, 8.69]])
+        L = np.linalg.cholesky(sigma)
+        c = 0.75
+        t = cp.Variable(name='t')
+        x = cp.Variable(shape=(3,), name='x')
+        s = cp.Variable(shape=(3,), name='s')
+        e = cp.Constant(np.ones(3, ))
+        objective = cp.Minimize(t - c * e @ s)
+        con1 = cp.norm(L.T @ x, p=2) <= t
+        con2 = ExpCone(s, e, x).as_quad_approx(5, 5)
+        # SolverTestHelper data
+        obj_pair = (objective, 4.0751197)
+        var_pairs = [
+            (x, np.array([0.57608346, 0.54315695, 0.28037716])),
+            (s, np.array([-0.55150, -0.61036, -1.27161])),
+        ]
+        con_pairs = [
+            (con1, 1.0),
+            (con2, [None,
+                    None,
+                    None]
+             )
+        ]
+        sth = STH.SolverTestHelper(obj_pair, var_pairs, con_pairs)
+        return sth
+
+    def test_expcone_socp_1(self):
+        sth = self.expcone_socp_1()
+        sth.solve(solver=cp.SCS)
+        sth.verify_primal_values(places=3)
+        sth.verify_objective(places=3)
+
+
+def sdp_ipm_installed():
+    viable = {cp.CVXOPT, cp.MOSEK, cp.COPT}.intersection(cp.installed_solvers())
+    return len(viable) > 0
+
+
+@unittest.skipUnless(sdp_ipm_installed(),
+                     'First-order solvers are too slow for the accuracy we need.')
+class TestOpRelConeQuad(BaseTest):
+
+    def setUp(self, n=3) -> None:
+        self.n = n
+        self.a = cp.Variable(shape=(n,), pos=True)
+        self.b = cp.Variable(shape=(n,), pos=True)
+        if hasattr(np.random, 'default_rng'):
+            self.rng = np.random.default_rng(0)
+        else:
+            self.rng = np.random.RandomState(0)
+        if hasattr(self.rng, 'random'):
+            rand_gen_func = self.rng.random
+        else:
+            rand_gen_func = self.rng.random_sample
+
+        self.a_lower = np.cumsum(rand_gen_func(n))
+        self.a_upper = self.a_lower + 0.05*rand_gen_func(n)
+        self.b_lower = np.cumsum(rand_gen_func(n))
+        self.b_upper = self.b_lower + 0.05*rand_gen_func(n)
+        self.base_cons = [
+            self.a_lower <= self.a,
+            self.a <= self.a_upper,
+            self.b_lower <= self.b,
+            self.b <= self.b_upper
+        ]
+        installed_solvers = cp.installed_solvers()
+        if cp.MOSEK in installed_solvers:
+            self.solver = cp.MOSEK
+        elif cp.CVXOPT in installed_solvers:
+            self.solver = cp.CVXOPT
+        elif cp.COPT in installed_solvers:
+            self.solver = cp.COPT
+        else:
+            raise RuntimeError('No viable solver installed.')
+        pass
+
+    @staticmethod
+    def Dop_commute(a: np.ndarray, b: np.ndarray, U: np.ndarray):
+        D = np.diag(a * np.log(a/b))
+        if np.iscomplexobj(U):
+            out = U @ D @ U.conj().T
+        else:
+            out = U @ D @ U.T
+        return out
+
+    @staticmethod
+    def sum_rel_entr_approx(a: cp.Expression, b: cp.Expression,
+                            apx_m: int, apx_k: int):
+        n = a.size
+        assert n == b.size
+        epi_vec = cp.Variable(shape=n)
+        con = cp.constraints.RelEntrConeQuad(a, b, epi_vec, apx_m, apx_k)
+        objective = cp.Minimize(cp.sum(epi_vec))
+        return objective, con
+
+    def oprelcone_1(self, apx_m, apx_k, real) -> STH.SolverTestHelper:
+        """
+        These tests construct two matrices that commute (imposing all eigenvectors equal)
+        and then use the fact that: T=Dop(A, B) for (A, B, T) in OpRelEntrConeQuad
+        i.e. T >> Dop(A, B) for an objective that is an increasing function of the
+        eigenvalues (which we here take to be the trace), we compute the reference
+        objective value as tr(Dop) whose correctness can be seen by writing out
+        tr(T)=tr(T-Dop)+tr(Dop), where tr(T-Dop)>=0 because of PSD-ness of (T-Dop),
+        and at optimality we have (T-Dop)=0 (the zero matrix of corresponding size)
+        For the case that the input matrices commute, Dop takes on a particularly
+        simplified form, i.e.: U @ diag(a * log(a/b)) @ U^{-1} (which is implemented
+        in the Dop_commute method above)
+        """
+        # Compute the expected optimal solution
+        temp_obj, temp_con = TestOpRelConeQuad.sum_rel_entr_approx(
+            self.a, self.b, apx_m, apx_k
+        )
+        temp_constraints = [con for con in self.base_cons]
+        temp_constraints.append(temp_con)
+        temp_prob = cp.Problem(temp_obj, temp_constraints)
+        temp_prob.solve()
+        expect_a = self.a.value
+        expect_b = self.b.value
+        expect_objective = temp_obj.value
+
+        # Next: create a matrix representation of the same problem,
+        # using operator relative entropy.
+        n = self.n
+        if real:
+            randmat = self.rng.normal(size=(n, n))
+            U = sp.linalg.qr(randmat)[0]
+            A = cp.symmetric_wrap(U @ cp.diag(self.a) @ U.T)
+            B = cp.symmetric_wrap(U @ cp.diag(self.b) @ U.T)
+            T = cp.Variable(shape=(n, n), symmetric=True)
+        else:
+            randmat = 1j * self.rng.normal(size=(n, n))
+            randmat += self.rng.normal(size=(n, n))
+            U = sp.linalg.qr(randmat)[0]
+            A = cp.hermitian_wrap(U @ cp.diag(self.a) @ U.conj().T)
+            B = cp.hermitian_wrap(U @ cp.diag(self.b) @ U.conj().T)
+            T = cp.Variable(shape=(n, n), hermitian=True)
+        main_con = cp.constraints.OpRelEntrConeQuad(A, B, T, apx_m, apx_k)
+        obj = cp.Minimize(trace(T))
+        expect_T = TestOpRelConeQuad.Dop_commute(expect_a, expect_b, U)
+
+        # Define the SolverTestHelper object
+        con_pairs = [(con, None) for con in self.base_cons]
+        con_pairs.append((main_con, None))
+        obj_pair = (obj, expect_objective)
+        var_pairs = [(T, expect_T)]
+        sth = STH.SolverTestHelper(obj_pair, var_pairs, con_pairs)
+        return sth
+
+    def test_oprelcone_1_m1_k3_real(self):
+        sth = self.oprelcone_1(1, 3, True)
+        sth.solve(self.solver)
+        sth.verify_primal_values(places=3)
+        sth.verify_objective(places=3)
+        pass
+
+    def test_oprelcone_1_m3_k1_real(self):
+        sth = self.oprelcone_1(3, 1, True)
+        sth.solve(self.solver)
+        sth.verify_primal_values(places=3)
+        sth.verify_objective(places=3)
+        pass
+
+    def test_oprelcone_1_m4_k4_real(self):
+        sth = self.oprelcone_1(4, 4, True)
+        sth.solve(self.solver)
+        sth.verify_primal_values(places=3)
+        sth.verify_objective(places=3)
+        pass
+
+    def test_oprelcone_1_m1_k3_complex(self):
+        sth = self.oprelcone_1(1, 3, False)
+        sth.solve(self.solver)
+        sth.verify_primal_values(places=3)
+        sth.verify_objective(places=3)
+        pass
+
+    def test_oprelcone_1_m3_k1_complex(self):
+        sth = self.oprelcone_1(3, 1, False)
+        sth.solve(self.solver)
+        sth.verify_primal_values(places=3)
+        sth.verify_objective(places=3)
+        pass
+
+    def oprelcone_2(self) -> STH.SolverTestHelper:
+        """
+        This test uses the same idea from the tests with commutative matrices,
+        instead, here, we make the input matrices to Dop, non-commutative,
+        the same condition as before i.e. T=Dop(A, B) for (A, B, T) in OpRelEntrConeQuad
+        (for an objective that is an increasing function of the eigenvalues) holds,
+        the difference here then, is in how we compute the reference values, which
+        has been done by assuming correctness of the original CVXQUAD matlab implementation
+        """
+        n, m, k = 4, 3, 3
+        # generate two sets of linearly orthogonal vectors
+        # Each to be set as the eigenvectors of a particular input matrix to Dop
+        U1 = np.array([[-0.05878522, -0.78378355, -0.49418311, -0.37149791],
+                       [0.67696027, -0.25733435, 0.59263364, -0.35254672],
+                       [0.43478177, 0.53648704, -0.54593428, -0.47444939],
+                       [0.59096015, -0.17788771, -0.32638042, 0.71595942]])
+        U2 = np.array([[-0.42499169, 0.6887562, 0.55846178, 0.18198188],
+                       [-0.55478633, -0.7091174, 0.3884544, 0.19613213],
+                       [-0.55591804, 0.14358541, -0.72444644, 0.38146522],
+                       [0.4500548, -0.04637494, 0.11135968, 0.88481584]])
+        a_diag = cp.Variable(shape=(n,), pos=True)
+        b_diag = cp.Variable(shape=(n,), pos=True)
+        A = U1 @ cp.diag(a_diag) @ U1.T
+        B = U2 @ cp.diag(b_diag) @ U2.T
+        T = cp.Variable(shape=(n, n), symmetric=True)
+        a_lower = np.array([0.40683013, 1.34514597, 1.60057343, 2.13373667])
+        a_upper = np.array([1.36158501, 1.61289351, 1.85065805, 3.06140939])
+        b_lower = np.array([0.06858235, 0.36798274, 0.95956627, 1.16286541])
+        b_upper = np.array([0.70446555, 1.16635299, 1.46126732, 1.81367755])
+        con1 = cp.constraints.OpRelEntrConeQuad(A, B, T, m, k)
+        con2 = a_lower <= a_diag
+        con3 = a_diag <= a_upper
+        con4 = b_lower <= b_diag
+        con5 = b_diag <= b_upper
+        con_pairs = [(con1, None),
+                     (con2, None),
+                     (con3, None),
+                     (con4, None),
+                     (con5, None)]
+        obj = cp.Minimize(trace(T))
+
+        expect_obj = 1.85476
+        expect_T = np.array([[0.49316819, 0.20845265, 0.60474713, -0.5820242],
+                             [0.20845265, 0.31084053, 0.2264112, -0.8442255],
+                             [0.60474713, 0.2264112, 0.4687153, -0.85667283],
+                             [-0.5820242, -0.8442255, -0.85667283, 0.58206723]])
+
+        obj_pair = (obj, expect_obj)
+        var_pairs = [(T, expect_T)]
+        sth = STH.SolverTestHelper(obj_pair, var_pairs, con_pairs)
+        return sth
+
+    def test_oprelcone_2(self):
+        sth = self.oprelcone_2()
+        sth.solve(self.solver)
+        sth.verify_primal_values(places=2)
+        sth.verify_objective(places=2)
+
+
+class _PSDOnlyClarabel(ClarabelSolver):
+    """Test-only Clarabel wrapper exposing only SvecPSD (no SOC)."""
+    SUPPORTED_CONSTRAINTS = ConicSolver.SUPPORTED_CONSTRAINTS + [SvecPSD]
+
+    def name(self):
+        return "_PSD_ONLY_CLARABEL"
+
+
+class _SOCOnlyClarabel(ClarabelSolver):
+    """Test-only Clarabel wrapper exposing only SOC (no PowCone3D)."""
+    SUPPORTED_CONSTRAINTS = ConicSolver.SUPPORTED_CONSTRAINTS + [SOC]
+
+    def name(self):
+        return "_SOC_ONLY_CLARABEL"
+
+
+class TestExactApproxCone2Cone(BaseTest):
+    """Tests for the ExactCone2Cone / ApproxCone2Cone framework."""
+
+    def test_exact_cone_conversions_map(self) -> None:
+        """EXACT_CONE_CONVERSIONS contains PowConeND and SOC."""
+        self.assertIn(PowConeND, EXACT_CONE_CONVERSIONS)
+        self.assertEqual(EXACT_CONE_CONVERSIONS[PowConeND], {PowCone3D})
+        self.assertIn(SOC, EXACT_CONE_CONVERSIONS)
+        self.assertEqual(EXACT_CONE_CONVERSIONS[SOC], {PSD})
+        self.assertNotIn(PowCone3D, EXACT_CONE_CONVERSIONS)
+
+    def test_approx_cone_conversions_map(self) -> None:
+        """APPROX_CONE_CONVERSIONS keys on PowCone3DApprox, not PowCone3D."""
+        self.assertIn(PowCone3DApprox, APPROX_CONE_CONVERSIONS)
+        self.assertEqual(APPROX_CONE_CONVERSIONS[PowCone3DApprox], {SOC})
+        self.assertNotIn(PowCone3D, APPROX_CONE_CONVERSIONS)
+
+    def test_exact_cone_conversions_is_dag(self) -> None:
+        """EXACT_CONE_CONVERSIONS must be a DAG (no cycles)."""
+        # Compute transitive reachability for each source cone.
+        # If any cone can reach itself, the graph has a cycle.
+        reachable = {src: set(tgts) for src, tgts in EXACT_CONE_CONVERSIONS.items()}
+        changed = True
+        while changed:
+            changed = False
+            for src in reachable:
+                new = set()
+                for t in reachable[src]:
+                    if t in reachable:
+                        new |= reachable[t]
+                if not new.issubset(reachable[src]):
+                    reachable[src] |= new
+                    changed = True
+        for src, targets in reachable.items():
+            self.assertNotIn(src, targets,
+                             f"Cycle detected: {src.__name__} can reach itself")
+
+    def test_exact_cone2cone_target_cones_filtering(self) -> None:
+        """ExactCone2Cone(target_cones={PowConeND}) only converts PowConeND."""
+        reduction = ExactCone2Cone(target_cones={PowConeND})
+        self.assertIn(PowConeND, reduction.canon_methods)
+        self.assertNotIn(SOC, reduction.canon_methods)
+
+    def test_exact_cone2cone_target_cones_soc(self) -> None:
+        """ExactCone2Cone(target_cones={SOC}) only converts SOC."""
+        reduction = ExactCone2Cone(target_cones={SOC})
+        self.assertIn(SOC, reduction.canon_methods)
+        self.assertNotIn(PowConeND, reduction.canon_methods)
+
+    def test_approx_cone2cone_target_cones_filtering(self) -> None:
+        """ApproxCone2Cone(target_cones=...) filters correctly."""
+        reduction = ApproxCone2Cone(target_cones={PowCone3DApprox})
+        self.assertIn(PowCone3DApprox, reduction.canon_methods)
+
+    def test_soc_to_psd_via_exact_cone2cone(self) -> None:
+        """SOC constraint solved via PSD-only solver uses ExactCone2Cone."""
+        x = cp.Variable(3)
+        prob = cp.Problem(
+            cp.Minimize(cp.sum(x)),
+            [cp.norm(x, 2) <= 1]
+        )
+        prob.solve(solver=_PSDOnlyClarabel())
+        self.assertIn(prob.status, [cp.OPTIMAL, cp.OPTIMAL_INACCURATE])
+        self.assertAlmostEqual(prob.value, -np.sqrt(3), places=3)
+
+    def test_soc_to_psd_dual_recovery(self) -> None:
+        """Dual variables recovered correctly through SOC→PSD→SvecPSD chain."""
+        x = cp.Variable(3)
+        t = cp.Variable()
+        soc_con = cp.SOC(t, x)
+        prob = cp.Problem(cp.Minimize(t), [soc_con, cp.sum(x) == 1])
+        prob.solve(solver=_PSDOnlyClarabel())
+        self.assertIn(prob.status, [cp.OPTIMAL, cp.OPTIMAL_INACCURATE])
+        dv = soc_con.dual_value
+        self.assertIsNotNone(dv)
+        for d in dv:
+            self.assertTrue(np.all(np.isfinite(d)))
+        # Complementary slackness: <primal_slack, dual> ≈ 0.
+        comp = cp.vdot(soc_con.args, soc_con.dual_value).value
+        self.assertAlmostEqual(comp, 0, places=3)
+
+    def test_soc_to_psd_packed(self) -> None:
+        """Packed SOC constraints via PSD-only solver work correctly."""
+        x = cp.Variable(3)
+        t = cp.Variable(2)
+        prob = cp.Problem(
+            cp.Minimize(t[0] + t[1]),
+            [cp.SOC(t, cp.vstack([x[:2], x[1:]]).T, axis=0),
+             cp.sum(x) == 1, x >= 0]
+        )
+        prob.solve(solver=_PSDOnlyClarabel())
+        self.assertIn(prob.status, [cp.OPTIMAL, cp.OPTIMAL_INACCURATE])
+
+    def test_explicit_powcone3d_errors_when_unsupported(self) -> None:
+        """Explicit PowCone3D errors when solver doesn't support it."""
+        x = cp.Variable(pos=True)
+        y = cp.Variable(pos=True)
+        z = cp.Variable()
+        prob = cp.Problem(
+            cp.Maximize(z),
+            [PowCone3D(x, y, z, 0.5), x + y <= 2]
+        )
+        with self.assertRaises(cp.error.SolverError):
+            prob.solve(solver=_SOCOnlyClarabel())
+
+    def test_powcone3d_approx_via_subclass(self) -> None:
+        """PowCone3DApprox is approximated when solver lacks PowCone3D."""
+        x = cp.Variable(pos=True)
+        y = cp.Variable(pos=True)
+        z = cp.Variable()
+        prob = cp.Problem(
+            cp.Maximize(z),
+            [PowCone3DApprox(x, y, z, 0.5), x + y <= 2]
+        )
+        prob.solve(solver=_SOCOnlyClarabel())
+        self.assertIn(prob.status, [cp.OPTIMAL, cp.OPTIMAL_INACCURATE])
+        self.assertAlmostEqual(z.value, 1.0, places=2)
+
+    def test_approx_cone2cone_dual_recovery(self) -> None:
+        """ApproxCone2Cone recovers dual variables for approximated constraints."""
+        x = cp.Variable(pos=True)
+        y = cp.Variable(pos=True)
+        z = cp.Variable()
+        pow_con = PowCone3DApprox(x, y, z, 0.5)
+        prob = cp.Problem(cp.Maximize(z), [pow_con, x + y <= 2])
+
+        reduction = ApproxCone2Cone(problem=prob, target_cones={PowCone3DApprox})
+        reduced_prob, inverse_data = reduction.apply(prob)
+
+        self.assertIn(pow_con.id, inverse_data.cons_id_map)
+        canon_id = inverse_data.cons_id_map[pow_con.id]
+
+        mock_dual_value = np.array([1.0])
+        mock_solution = Solution(
+            status=cp.OPTIMAL,
+            opt_val=1.0,
+            primal_vars={},
+            dual_vars={canon_id: mock_dual_value},
+            attr={}
+        )
+
+        inverted = reduction.invert(mock_solution, inverse_data)
+        self.assertIn(pow_con.id, inverted.dual_vars)
+        self.assertEqual(inverted.dual_vars[pow_con.id], mock_dual_value)
+
+
+class TestPSDUtils(BaseTest):
+    """Tests for tri_to_full and psd_format_mat round-trip correctness."""
+
+    def _random_psd(self, n, rng):
+        A = rng.standard_normal((n, n))
+        return A @ A.T
+
+    def test_tri_to_full_round_trip(self) -> None:
+        """psd_format_mat -> tri_to_full recovers the symmetrised matrix."""
+        from cvxpy.utilities.psd_utils import TriangleKind, psd_format_mat, tri_to_full
+        rng = np.random.default_rng(42)
+        n = 4
+        X = cp.Variable((n, n), symmetric=True)
+        con = PSD(X)
+        M_val = self._random_psd(n, rng)
+        X.value = M_val
+
+        for tri_kind in TriangleKind:
+            for sqrt2 in [True, False]:
+                M = psd_format_mat(con, tri_kind, sqrt2)
+                svec = (M @ M_val.ravel(order='F'))
+                recovered = tri_to_full(svec, n, tri_kind, sqrt2)
+                np.testing.assert_allclose(recovered, M_val, atol=1e-12)
+
+    def test_tri_to_full_round_trip_batched(self) -> None:
+        """Round-trip works for batched (2, n, n) PSD constraints."""
+        from cvxpy.utilities.psd_utils import TriangleKind, psd_format_mat, tri_to_full
+        rng = np.random.default_rng(7)
+        n = 3
+        batch = 2
+        X = cp.Variable((batch, n, n), symmetric=True)
+        con = PSD(X)
+        Ms = np.stack([self._random_psd(n, rng) for _ in range(batch)])
+        X.value = Ms
+
+        for tri_kind in TriangleKind:
+            for sqrt2 in [True, False]:
+                M = psd_format_mat(con, tri_kind, sqrt2)
+                svec = M @ Ms.ravel(order='F')
+                recovered = tri_to_full(svec, n, tri_kind, sqrt2)
+                np.testing.assert_allclose(recovered, Ms, atol=1e-12)
+
+    def test_tri_to_full_n1(self) -> None:
+        """1x1 matrix round-trips correctly (edge case: no off-diagonals)."""
+        from cvxpy.utilities.psd_utils import TriangleKind, psd_format_mat, tri_to_full
+        X = cp.Variable((1, 1), symmetric=True)
+        con = PSD(X)
+        X.value = np.array([[5.0]])
+
+        for tri_kind in TriangleKind:
+            for sqrt2 in [True, False]:
+                M = psd_format_mat(con, tri_kind, sqrt2)
+                svec = M @ np.array([5.0])
+                recovered = tri_to_full(svec, 1, tri_kind, sqrt2)
+                np.testing.assert_allclose(recovered, np.array([[5.0]]), atol=1e-12)
+
+
+class TestMixedPSDSOC(BaseTest):
+    """Tests for problems with both PSD and SOC constraints via PSD-only solver."""
+
+    def test_mixed_psd_soc(self) -> None:
+        """Problem with both PSD and SOC constraints through _PSDOnlyClarabel."""
+        X = cp.Variable((2, 2), symmetric=True)
+        y = cp.Variable(2)
+        prob = cp.Problem(
+            cp.Minimize(cp.trace(X) + cp.sum(y)),
+            [X >> 0, X[0, 1] >= 1, cp.norm(y, 2) <= 1]
+        )
+        prob.solve(solver=_PSDOnlyClarabel())
+        self.assertIn(prob.status, [cp.OPTIMAL, cp.OPTIMAL_INACCURATE])
+        # X optimal: min trace with X[0,1]>=1 and PSD gives trace=2
+        # y optimal: min sum(y) with ||y||<=1 gives -sqrt(2)
+        self.assertAlmostEqual(prob.value, 2 - np.sqrt(2), places=3)
+
+
+class TestSlacksInvert(BaseTest):
+
+    def test_slacks_invert_none_opt_val(self) -> None:
+        """Slacks.invert should not crash when opt_val is None."""
+        solution = Solution(s.SOLVER_ERROR, None, {}, {}, {})
+        inv_data = {'x_id': 0, s.OBJ_OFFSET: 5.0}
+        result = a2d.Slacks.invert(solution, inv_data)
+        self.assertIsNone(result.opt_val)
+
+    def test_pow_cone_nd_is_dcp(self) -> None:
+        """PowConeND.is_dcp() should check affinity of arguments."""
+        x = cp.Variable(2, nonneg=True)
+        z = cp.Variable()
+        alpha = np.array([0.5, 0.5])
+        constr = PowConeND(x, z, alpha)
+        self.assertTrue(constr.is_dcp())
+        self.assertTrue(constr.args[0].is_affine())
+        self.assertTrue(constr.args[1].is_affine())
+
+
+class TestRSOC(unittest.TestCase):
+    """Tests for the RSOC (Rotated Second-Order Cone) constraint."""
+
+    def test_invalid_t_shape(self):
+        """Test that a vector t with scalar u raises ValueError."""
+        x = cp.Variable(3)
+        t = cp.Variable(2)
+        u = cp.Variable(nonneg=True)
+        with pytest.raises(ValueError):
+            cp.RSOC(t, u, x)
+
+    def test_invalid_u_shape(self):
+        """Test that vector t and u must have matching shapes."""
+        x = cp.Variable(3)
+        t = cp.Variable(3, nonneg=True)
+        u = cp.Variable(2)
+        with pytest.raises(ValueError):
+            cp.RSOC(t, u, x)
+
+    def test_is_dcp(self):
+        """Test that RSOC is DCP when arguments are affine."""
+        x = cp.Variable(3)
+        t = cp.Variable(nonneg=True)
+        u = cp.Variable(nonneg=True)
+        con = cp.RSOC(t, u, x)
+        assert con.is_dcp()
+
+    def test_solve_basic(self):
+        """Test solving a basic RSOC problem."""
+        n = 5
+        x = cp.Variable(n)
+        t = cp.Variable(nonneg=True)
+        u = cp.Variable(nonneg=True)
+        prob = cp.Problem(cp.Minimize(t + u),
+                          [cp.RSOC(t, u, x), x == np.ones(n)])
+        prob.solve(solver=cp.CLARABEL)
+        assert prob.status == cp.OPTIMAL
+        t_opt, u_opt, x_opt = t.value, u.value, x.value
+        # Check RSOC constraint: 2tu >= ||x||^2.
+        assert 2 * t_opt * u_opt >= np.dot(x_opt, x_opt) - 1e-4
+        assert t_opt >= -1e-6 and u_opt >= -1e-6
+
+    def test_equivalence_with_quad_over_lin(self):
+        """Test equivalence of RSOC with quad_over_lin formulation."""
+        n = 4
+        x_val = np.array([1.0, 2.0, 3.0, 4.0])
+        t_val = 3.0
+
+        # RSOC formulation
+        x1 = cp.Variable(n)
+        t1 = cp.Variable(nonneg=True)
+        u1 = cp.Variable()
+        prob1 = cp.Problem(cp.Minimize(u1),
+                           [cp.RSOC(t1, u1, x1),
+                            x1 == x_val, t1 == t_val])
+        prob1.solve(solver=cp.CLARABEL)
+
+        # quad_over_lin formulation: u >= ||x||^2 / (2t).
+        x2 = cp.Variable(n)
+        u2 = cp.Variable()
+        prob2 = cp.Problem(cp.Minimize(u2),
+                           [u2 >= cp.quad_over_lin(x2, 2 * t_val),
+                            x2 == x_val])
+        prob2.solve(solver=cp.CLARABEL)
+
+        # Both should give u = ||x_val||^2 / (2*t_val).
+        expected = np.dot(x_val, x_val) / (2 * t_val)
+        assert np.isclose(prob1.value, expected, atol=1e-4)
+        assert np.isclose(prob2.value, expected, atol=1e-4)
+
+    def test_dual_variables_scalar(self):
+        """Test dual variable recovery for scalar RSOC.
+
+        Verifies that:
+        - dual_value is a list of three arrays [dt, du, dx] (not [flat, None, None])
+        - All three dual variables are populated (not None)
+        - dx has the same shape as the X argument
+        - dt and du are scalars matching t and u shapes
+        - Dual cone membership: 2*dt*du >= ||dx||^2, dt >= 0, du >= 0
+        - KKT stationarity holds
+        """
+        n = 3
+        x = cp.Variable(n)
+        t = cp.Variable(nonneg=True)
+        u = cp.Variable(nonneg=True)
+        x_val = np.array([1.0, 1.0, 1.0])
+        con_rsoc = cp.RSOC(t, u, x)
+        con_eq = x == x_val
+        prob = cp.Problem(cp.Minimize(t + u),
+                          [con_rsoc, con_eq])
+        prob.solve(solver=cp.CLARABEL)
+        assert prob.status == cp.OPTIMAL
+
+        # dual_value should be [dt, du, dx] with all three populated.
+        dv = con_rsoc.dual_value
+        assert isinstance(dv, list) and len(dv) == 3
+        dt, du, dx = dv
+        # None checks: all three dual variables must be populated
+        assert dx is not None, "dx dual is None"
+        assert dt is not None, "dt dual is None"
+        assert du is not None, "du dual is None"
+        # Shape checks: dx should match X shape, dt/du should be scalar-like.
+        dx = np.atleast_1d(np.asarray(dx, dtype=float))
+        dt = float(dt)
+        du = float(du)
+        assert dx.shape == (n,), f"dx shape {dx.shape} != ({n},)"
+        # Dual cone membership (RSOC is self-dual)
+        assert 2 * dt * du >= np.dot(dx, dx) - 1e-4, \
+            "Dual cone violated: 2*dt*du < ||dx||^2"
+        assert dt >= -1e-6, f"dt dual negative: {dt}"
+        assert du >= -1e-6, f"du dual negative: {du}"
+        # KKT stationarity: dL/dt = 1 - dt = 0, dL/du = 1 - du = 0.
+        assert abs(1 - dt) < 1e-4, f"|1 - dt| = {abs(1 - dt)}"
+        assert abs(1 - du) < 1e-4, f"|1 - du| = {abs(1 - du)}"
+        # KKT stationarity: dL/dx = -dx + mu = 0 => dx = mu
+        mu = np.asarray(con_eq.dual_value, dtype=float)
+        np.testing.assert_allclose(dx, mu, atol=1e-4)
+
+    def test_residual_feasible(self):
+        """Test residual is near zero for a feasible point."""
+        x = cp.Variable(3)
+        t = cp.Variable(nonneg=True)
+        u = cp.Variable(nonneg=True)
+        con = cp.RSOC(t, u, x)
+        prob = cp.Problem(cp.Minimize(t + u),
+                          [con, x == np.array([1.0, 1.0, 1.0])])
+        prob.solve(solver=cp.CLARABEL)
+        assert prob.status == cp.OPTIMAL
+        assert con.residual < 1e-4
+
+    def test_dual_residual_scalar(self):
+        """Test that dual_residual is computable and near zero for scalar RSOC.
+
+        dual_residual checks that the recovered duals lie in the dual cone
+        (which is RSOC itself since it's self-dual). This requires all three
+        dual variables to be populated, not just dual_variables[0].
+        """
+        n = 3
+        x = cp.Variable(n)
+        t = cp.Variable(nonneg=True)
+        u = cp.Variable(nonneg=True)
+        con = cp.RSOC(t, u, x)
+        prob = cp.Problem(cp.Minimize(t + u),
+                          [con, x == np.array([1.0, 1.0, 1.0])])
+        prob.solve(solver=cp.CLARABEL)
+        assert prob.status == cp.OPTIMAL
+        # dual_residual should be a finite number, not None
+        dr = con.dual_residual
+        assert dr is not None, "dual_residual is None"
+        assert np.isfinite(dr), f"dual_residual is not finite: {dr}"
+        assert dr < 1e-4, f"dual_residual too large: {dr}"
+
+    def test_dual_residual_batched(self):
+        """Test that dual_residual works for batched RSOC."""
+        np.random.seed(42)
+        n, k = 4, 3
+        X = cp.Variable((n, k))
+        t = cp.Variable(k, nonneg=True)
+        u = cp.Variable(k, nonneg=True)
+        X_val = np.random.randn(n, k)
+        con = cp.RSOC(t, u, X)
+        prob = cp.Problem(cp.Minimize(cp.sum(t + u)),
+                          [con, X == X_val])
+        prob.solve(solver=cp.CLARABEL)
+        assert prob.status == cp.OPTIMAL
+        dr = con.dual_residual
+        assert dr is not None, "dual_residual is None for batched RSOC"
+        dr_arr = np.atleast_1d(dr)
+        assert np.all(np.isfinite(dr_arr)), f"dual_residual not finite: {dr_arr}"
+        assert np.all(dr_arr < 1e-4), f"dual_residual too large: {dr_arr}"
+
+    def test_batch_rsoc(self):
+        """Test batched RSOC: X matrix, t and u vectors.
+
+        Verifies primal feasibility and that dual variables:
+        - Are stored in all three dual_variables (not just [0])
+        - Have shapes matching the primal arguments: dx ~ (n, k), dt ~ (k,), du ~ (k,)
+        - Satisfy dual cone membership per cone
+        - Satisfy KKT stationarity
+        """
+        np.random.seed(42)
+        n, k = 4, 3  # n-dim vectors, k cones
+        X = cp.Variable((n, k))
+        t = cp.Variable(k, nonneg=True)
+        u = cp.Variable(k, nonneg=True)
+        X_val = np.random.randn(n, k)
+        con = cp.RSOC(t, u, X)
+        con_eq = X == X_val
+        prob = cp.Problem(cp.Minimize(cp.sum(t + u)),
+                          [con, con_eq])
+        prob.solve(solver=cp.CLARABEL)
+        assert prob.status == cp.OPTIMAL
+        # Check primal feasibility: 2*t[i]*u[i] >= ||X[:, i]||^2.
+        X_opt = X.value
+        t_opt = t.value
+        u_opt = u.value
+        for i in range(k):
+            lhs = 2 * t_opt[i] * u_opt[i]
+            rhs = np.dot(X_opt[:, i], X_opt[:, i])
+            assert lhs >= rhs - 1e-4
+
+        # Check that dual_value is [dt, du, dx] with all populated.
+        dv = con.dual_value
+        assert isinstance(dv, list) and len(dv) == 3
+        dt, du, dx = dv
+        assert dx is not None, "dx dual is None"
+        assert dt is not None, "dt dual is None"
+        assert du is not None, "du dual is None"
+
+        # Shape checks: dx should match X shape (n, k), dt/du should be (k,).
+        dx = np.asarray(dx, dtype=float)
+        dt = np.asarray(dt, dtype=float).ravel()
+        du = np.asarray(du, dtype=float).ravel()
+        assert dx.shape == (n, k), f"dx shape {dx.shape} != ({n}, {k})"
+        assert dt.shape == (k,), f"dt shape {dt.shape} != ({k},)"
+        assert du.shape == (k,), f"du shape {du.shape} != ({k},)"
+
+        # Dual cone membership per cone (RSOC is self-dual)
+        for i in range(k):
+            dx_i = dx[:, i]
+            norm_sq = np.dot(dx_i, dx_i)
+            lhs = 2 * dt[i] * du[i]
+            assert lhs >= norm_sq - 1e-4, \
+                f"Cone {i}: dual cone violated 2*dt*du={lhs} < ||dx||^2={norm_sq}"
+            assert dt[i] >= -1e-6, f"Cone {i}: dt negative: {dt[i]}"
+            assert du[i] >= -1e-6, f"Cone {i}: du negative: {du[i]}"
+
+        # KKT stationarity: dL/dt_i = 1 - dt_i = 0, dL/du_i = 1 - du_i = 0.
+        np.testing.assert_allclose(dt, np.ones(k), atol=1e-4)
+        np.testing.assert_allclose(du, np.ones(k), atol=1e-4)
+        # KKT stationarity: dx = mu (equality constraint dual)
+        mu = np.asarray(con_eq.dual_value, dtype=float)
+        np.testing.assert_allclose(dx, mu, atol=1e-4)
+
+    def test_axis1_solve_residual_dual(self):
+        """Test RSOC with axis=1: X has shape (k, n), cones along columns."""
+        np.random.seed(7)
+        n, k = 3, 4  # n-dim vectors, k cones
+        X = cp.Variable((k, n))
+        t = cp.Variable(k, nonneg=True)
+        u = cp.Variable(k, nonneg=True)
+        X_val = np.random.randn(k, n)
+        con = cp.RSOC(t, u, X, axis=1)
+        prob = cp.Problem(cp.Minimize(cp.sum(t + u)),
+                          [con, X == X_val])
+        prob.solve(solver=cp.CLARABEL)
+        assert prob.status == cp.OPTIMAL
+
+        # Check primal feasibility: 2*t[i]*u[i] >= ||X[i, :]||^2.
+        X_opt = X.value
+        t_opt = t.value
+        u_opt = u.value
+        for i in range(k):
+            lhs = 2 * t_opt[i] * u_opt[i]
+            rhs = np.dot(X_opt[i, :], X_opt[i, :])
+            assert lhs >= rhs - 1e-4, f"Cone {i} violated: 2tu={lhs} < ||x||^2={rhs}"
+
+        # Check residual is non-negative and finite
+        res = con.residual
+        assert res is not None
+        assert np.all(np.isfinite(res))
+        assert np.all(res >= -1e-6)
+
+        # Check dual variables are populated and have correct shapes
+        dv = con.dual_value
+        assert isinstance(dv, list) and len(dv) == 3
+        dt, du, dx = dv
+        assert dx is not None
+        assert dt is not None
+        assert du is not None
+        dx = np.asarray(dx, dtype=float)
+        dt = np.asarray(dt, dtype=float).ravel()
+        du = np.asarray(du, dtype=float).ravel()
+        assert dx.shape == (k, n), f"dx shape {dx.shape} != ({k}, {n})"
+        assert dt.shape == (k,), f"dt shape {dt.shape} != ({k},)"
+        assert du.shape == (k,), f"du shape {du.shape} != ({k},)"
+
+    def test_dpp_compliance(self):
+        """Test that RSOC is DPP when a Parameter appears in the constraint."""
+        n = 3
+        x = cp.Variable(n)
+        u = cp.Variable(nonneg=True)
+        t_par = cp.Parameter(nonneg=True)
+        # Parameter directly inside RSOC — this is what DPP needs to handle.
+        con = cp.RSOC(t_par, u, x)
+        prob = cp.Problem(cp.Minimize(u), [con, x == np.ones(n)])
+        assert prob.is_dpp()
+
+        t_par.value = 3.0
+        prob.solve(solver=cp.CLARABEL)
+        assert prob.status == cp.OPTIMAL
+        val1 = prob.value
+
+        # Re-solve with different parameter (should reuse cached canon).
+        t_par.value = 1.0
+        prob.solve(solver=cp.CLARABEL)
+        assert prob.status == cp.OPTIMAL
+        val2 = prob.value
+
+        # u >= ||x||^2 / (2*t), so smaller t gives larger u.
+        assert val2 > val1

@@ -12,7 +12,7 @@ Topic references
    Bounds for Constrained Estimation with Uncertainty." Decision and
    Control, 2005 and 2005 European Control Conference. CDC-ECC'05. 44th
    IEEE Conference on. IEEE,
-   2005. <http://web.stanford.edu/~boyd/papers/pdf/map_bounds.pdf>`__
+   2005. <https://web.stanford.edu/~boyd/papers/pdf/map_bounds.pdf>`__
 
 Problem statement
 =================
@@ -106,7 +106,7 @@ That is,
     sigma = np.sqrt(p*n/(snr**2))
     A = np.random.randn(m,n)
     
-    x_true = (np.random.rand(n) <= p).astype(np.int)
+    x_true = (np.random.rand(n) <= p).astype(int)
     v = sigma*np.random.randn(m)
     
     y = A.dot(x_true) + v

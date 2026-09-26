@@ -22,15 +22,26 @@ import numpy as np
 
 from cvxpy.atoms.affine.reshape import reshape
 from cvxpy.atoms.affine.vstack import vstack
+from cvxpy.constraints.power import PowCone3D
 from cvxpy.constraints.second_order import SOC
 from cvxpy.expressions.variable import Variable
 
 
 def gm(t, x, y):
     length = t.size
-    return SOC(t=reshape(x+y, (length,)),
-               X=vstack([reshape(x-y, (1, length)), reshape(2*t, (1, length))]),
+    return SOC(t=reshape(x+y, (length,), order='F'),
+               X=vstack([
+                   reshape(x-y, (1, length), order='F'),
+                   reshape(2*t, (1, length), order='F')
+               ]),
                axis=0)
+
+
+def powcone_constrs(t, x_list, p):
+    # We just need a single power cone constraint here.
+
+    constraints = [PowCone3D(x_list[0], x_list[1], t, p)]
+    return constraints
 
 
 def gm_constrs(t, x_list, p):
@@ -66,8 +77,9 @@ def gm_constrs(t, x_list, p):
     d = defaultdict(lambda: Variable(t.shape))
     d[w] = t
 
-    if len(x_list) < len(w):
-        x_list += [t]
+    long_w = len(w) - len(x_list)
+    if long_w > 0:
+        x_list += [t]*long_w
 
     assert len(x_list) == len(w)
 
@@ -82,10 +94,16 @@ def gm_constrs(t, x_list, p):
         if 1 not in elem:
             constraints += [gm(d[elem], d[children[0]], d[children[1]])]
 
+    # Handle single-variable case
+    if len(x_list) == 1:
+        # Assuming p[0] = 1 for geometric mean
+        x = x_list[0]
+        constraints += [t == x]
+
     return constraints
 
 
-def pow_high(p, max_denom: int = 1024):
+def pow_high(p, max_denom: int = 1024, approx: bool = True):
     """ Return (t,1,x) power tuple
 
         x <= t^(1/p) 1^(1-1/p)
@@ -93,13 +111,16 @@ def pow_high(p, max_denom: int = 1024):
         user wants the epigraph variable t
     """
     assert p > 1
-    p = Fraction(1/Fraction(p)).limit_denominator(max_denom)
-    if 1/p == int(1/p):
-        return int(1/p), (p, 1-p)
-    return 1/p, (p, 1-p)
+    if approx:
+        p = Fraction(1/Fraction(p)).limit_denominator(max_denom)
+        if 1/p == int(1/p):
+            return int(1/p), (p, 1-p)
+        return 1/p, (p, 1-p)
+
+    return p, (1/p, 1-1/p)
 
 
-def pow_mid(p, max_denom: int = 1024):
+def pow_mid(p, max_denom: int = 1024, approx: bool = True):
     """ Return (x,1,t) power tuple
 
         t <= x^p 1^(1-p)
@@ -107,11 +128,12 @@ def pow_mid(p, max_denom: int = 1024):
         user wants the epigraph variable t
     """
     assert 0 < p < 1
-    p = Fraction(p).limit_denominator(max_denom)
+    if approx:
+        p = Fraction(p).limit_denominator(max_denom)
     return p, (p, 1-p)
 
 
-def pow_neg(p, max_denom: int = 1024):
+def pow_neg(p, max_denom: int = 1024, approx: bool = True):
     """ Return (x,t,1) power tuple
 
         1 <= x^(p/(p-1)) t^(-1/(p-1))
@@ -119,9 +141,12 @@ def pow_neg(p, max_denom: int = 1024):
         user wants the epigraph variable t
     """
     assert p < 0
-    p = Fraction(p)
-    p = Fraction(p/(p-1)).limit_denominator(max_denom)
-    return p/(p-1), (p, 1-p)
+    if approx:
+        p = Fraction(p)
+        p = Fraction(p/(p-1)).limit_denominator(max_denom)
+        return p/(p-1), (p, 1-p)
+
+    return p, (p/(p-1), -1/(p-1))
 
 
 def is_power2(num) -> bool:
@@ -225,6 +250,14 @@ def is_weight(w) -> bool:
     return valid_elems and sum(w) == 1
 
 
+__EXCEED_DENOMINATOR_LIMIT__ = \
+    """
+    Can't reliably represent the input weight vector.
+    Try increasing `max_denom` or checking the denominators
+    of your input fractions.
+    """
+
+
 def fracify(a, max_denom: int = 1024, force_dyad: bool = False):
     """ Return a valid fractional weight tuple (and its dyadic completion)
         to represent the weights given by ``a``.
@@ -263,6 +296,7 @@ def fracify(a, max_denom: int = 1024, force_dyad: bool = False):
         That is, if w has fractions with denominators that are not a power of 2,
         and ``len(w) == n`` then w_dyad has length n+1, dyadic fractions for elements,
         and ``w_dyad[:-1]/w_dyad[n] == w``.
+        # ^ That isn't always possible, is it?
 
         Alternatively, the ratios between the
         first n elements of ``w_dyad`` are equal to the corresponding ratios between
@@ -362,17 +396,18 @@ def fracify(a, max_denom: int = 1024, force_dyad: bool = False):
         w_frac = tuple(Fraction(v, total) for v in a)
         d = max(v.denominator for v in w_frac)
         if d > max_denom:
-            msg = ("Can't reliably represent the input weight vector."
-                   "\nTry increasing `max_denom` or checking the denominators "
-                   "of your input fractions.")
-            raise ValueError(msg)
+            raise ValueError(__EXCEED_DENOMINATOR_LIMIT__)
     else:
         # fall through code
         w_frac = tuple(Fraction(float(v)/total).limit_denominator(max_denom) for v in a)
         if sum(w_frac) != 1:
             w_frac = make_frac(a, max_denom)
 
-    return w_frac, dyad_completion(w_frac)
+    w_dyad = dyad_completion(w_frac)
+    if max(v.denominator for v in w_dyad) > max_denom:
+        raise ValueError(__EXCEED_DENOMINATOR_LIMIT__)
+
+    return w_frac, w_dyad
 
 
 def make_frac(a, denom):
@@ -388,14 +423,13 @@ def make_frac(a, denom):
     """
 
     a = np.array(a, dtype=float)/sum(a)
-    b = [float(v*denom) for v in a]
-    b = np.array(b, dtype=int)
+    b = (denom * a).astype(int)
     err = b/float(denom) - a
 
     inds = np.argsort(err)[:(denom - sum(b))]
     b[inds] += 1
 
-    denom = np.int32(denom)
+    denom = int(denom)
     b = b.tolist()
 
     return tuple(Fraction(v, denom) for v in b)
@@ -423,16 +457,15 @@ def dyad_completion(w):
     (Fraction(1, 1), Fraction(0, 1), Fraction(0, 1), Fraction(0, 1))
     """
     w = tuple(Fraction(v) for v in w)
-    d = max(v.denominator for v in w)
-
-    # if extra_index:
-    p = next_pow2(d)
-    if p == d:
-        # the tuple of fractions is already dyadic
-        return w
-    else:
+    non_dyad_dens = [v.denominator for v in w if not is_power2(v.denominator)]
+    if len(non_dyad_dens) > 0:
         # need to add the dummy variable to represent as dyadic
-        return tuple(Fraction(v*d, p) for v in w) + (Fraction(p-d, p),)
+        d = max(non_dyad_dens)
+        p = next_pow2(d)
+        w_aug = tuple(Fraction(v*d, p) for v in w) + (Fraction(p-d, p),)
+        return dyad_completion(w_aug)
+    else:
+        return w
 
 
 def approx_error(a_orig, w_approx):

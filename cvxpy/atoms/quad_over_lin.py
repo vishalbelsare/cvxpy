@@ -14,34 +14,56 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from typing import List, Tuple
 
 import numpy as np
 import scipy as scipy
 import scipy.sparse as sp
 
+import cvxpy.utilities as u
 from cvxpy.atoms.atom import Atom
+from cvxpy.atoms.axis_atom import AxisAtom, normalize_axis
 from cvxpy.constraints.constraint import Constraint
+from cvxpy.expressions.constants.parameter import is_param_free
 
 
-class quad_over_lin(Atom):
-    """ :math:`(sum_{ij}X^2_{ij})/y`
+class quad_over_lin(AxisAtom):
+    """:math:`(sum_{ij}X^2_{ij})/y`
 
+    When axis is specified, computes the sum of squares along that axis,
+    returning a vector instead of a scalar.
     """
     _allow_complex = True
 
-    def __init__(self, x, y) -> None:
-        super(quad_over_lin, self).__init__(x, y)
+    def __init__(
+        self,
+        x,
+        y,
+        axis: int | tuple[int, ...] | None = None,
+        keepdims: bool = False
+    ) -> None:
+        self.axis = axis
+        self.keepdims = keepdims
+        # Call Atom.__init__ directly since we have two args
+        Atom.__init__(self, x, y)
+        # Normalize axis after init so self.args is available.
+        if self.axis is not None:
+            ndim = len(self.args[0].shape)
+            self.axis = normalize_axis(self.axis, ndim)
 
     @Atom.numpy_numeric
     def numeric(self, values):
         """Returns the sum of the entries of x squared over y.
         """
+        x_val = values[0]
+        y_val = values[1].item()
         if self.args[0].is_complex():
-            return (np.square(values[0].imag) + np.square(values[0].real)).sum()/values[1]
-        return np.square(values[0]).sum()/values[1]
+            squared = np.square(x_val.imag) + np.square(x_val.real)
+        else:
+            squared = np.square(x_val)
 
-    def _domain(self) -> List[Constraint]:
+        return squared.sum(axis=self.axis, keepdims=self.keepdims) / y_val
+
+    def _domain(self) -> list[Constraint]:
         """Returns constraints describing the domain of the node.
         """
         # y > 0.
@@ -58,6 +80,10 @@ class quad_over_lin(Atom):
         Returns:
             A list of SciPy CSC sparse matrices or None.
         """
+        # Gradient not implemented for axis case
+        if self.axis is not None:
+            return [None, None]
+
         X = values[0]
         y = values[1]
         if y <= 0:
@@ -69,18 +95,16 @@ class quad_over_lin(Atom):
             else:
                 Dy = -np.square(X).sum()/np.square(y)
 
-            Dy = sp.csc_matrix(Dy)
+            # Ensure Dy is a scalar for proper sparse array construction
+            Dy = float(np.asarray(Dy).item() if np.asarray(Dy).ndim > 0 else Dy)
+            Dy = sp.csc_array([[Dy]])
             DX = 2.0*X/y
-            DX = np.reshape(DX, (self.args[0].size, 1))
-            DX = scipy.sparse.csc_matrix(DX)
+            # Use F-order to match CVXPY's vectorization convention
+            DX = np.reshape(DX, (self.args[0].size, 1), order='F')
+            DX = scipy.sparse.csc_array(DX)
             return [DX, Dy]
 
-    def shape_from_args(self) -> Tuple[int, ...]:
-        """Returns the (row, col) shape of the expression.
-        """
-        return tuple()
-
-    def sign_from_args(self) -> Tuple[bool, bool]:
+    def sign_from_args(self) -> tuple[bool, bool]:
         """Returns sign (is positive, is negative) of the expression.
         """
         # Always positive.
@@ -89,12 +113,20 @@ class quad_over_lin(Atom):
     def is_atom_convex(self) -> bool:
         """Is the atom convex?
         """
-        return True
+        # Disable DPP when the second argument is a parameter.
+        if u.scopes.dpp_scope_active():
+            return is_param_free(self.args[1])
+        else:
+            return True
 
     def is_atom_concave(self) -> bool:
         """Is the atom concave?
         """
         return False
+
+    def is_atom_smooth(self) -> bool:
+        """Is the atom smooth?"""
+        return True
 
     def is_atom_log_log_convex(self) -> bool:
         """Is the atom log-log convex?
@@ -123,12 +155,18 @@ class quad_over_lin(Atom):
             raise ValueError("The second argument to quad_over_lin must be a scalar.")
         if self.args[1].is_complex():
             raise ValueError("The second argument to quad_over_lin cannot be complex.")
+        # AxisAtom.validate_arguments handles axis validation
         super(quad_over_lin, self).validate_arguments()
 
     def is_quadratic(self) -> bool:
         """Quadratic if x is affine and y is constant.
         """
         return self.args[0].is_affine() and self.args[1].is_constant()
+
+    def has_quadratic_term(self) -> bool:
+        """A quadratic term if y is constant.
+        """
+        return self.args[1].is_constant()
 
     def is_qpwa(self) -> bool:
         """Quadratic of piecewise affine if x is PWL and y is constant.

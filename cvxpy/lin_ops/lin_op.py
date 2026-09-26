@@ -16,17 +16,16 @@ limitations under the License.
 THIS FILE IS DEPRECATED AND MAY BE REMOVED WITHOUT WARNING!
 DO NOT CALL THESE FUNCTIONS IN YOUR CODE!
 """
-from typing import Tuple
 
 
 # A linear operator applied to a variable
 # or a constant or function of parameters.
 class LinOp:
-    def __init__(self, type, shape: Tuple[int, ...], args, data) -> None:
+    def __init__(self, type, shape: tuple[int, ...], args, data) -> None:
         self.type = type
         self.shape = shape
         self.args = args
-        self.data = data
+        self.data = data  # This is later set to C++ LinOp objects' linOp_data_ field.
 
     def __repr__(self) -> str:
         return f"LinOp({self.type}, {self.shape})"
@@ -40,6 +39,9 @@ VARIABLE = "variable"
 # Promoting a scalar expression.
 # Data: None
 PROMOTE = "promote"
+# Broadcasting an expression.
+# Data: Shape to broadcast to.
+BROADCAST_TO = "broadcast_to"
 # Multiplying an expression by a constant.
 # Data: LinOp evaluating to the left hand multiple.
 MUL = "mul"
@@ -72,10 +74,10 @@ TRACE = "trace"
 # Data: None
 RESHAPE = "reshape"
 # Converts a vector to a diagonal matrix.
-# Data: None
+# Data: int, diagonal offset
 DIAG_VEC = "diag_vec"
 # Converts the diagonal of a matrix to a vector.
-# Data: None
+# Data: int, diagonal offset
 DIAG_MAT = "diag_mat"
 # Vectorized upper triangular portion of a matrix.
 # Data: None
@@ -84,14 +86,19 @@ UPPER_TRI = "upper_tri"
 # Data: LinOp evaluating to the left hand term.
 CONV = "conv"
 # The Kronecker product of two matrices.
-# Data: LinOp evaluating to the left hand term.
-KRON = "kron"
+# Data: LinOp evaluating to the left hand term (variable in the right-hand term).
+KRON_R = "kron_r"
+# Data: LinOp evaluating to the right hand term (variable in the left-hand term).
+KRON_L = "kron_l"
 # Horizontally concatenating operators.
 # Data: None
 HSTACK = "hstack"
 # Vertically concatenating operators.
 # Data: None
 VSTACK = "vstack"
+# Stack concatenating operators.
+# Data: None
+CONCATENATE = "concatenate"
 # A scalar constant.
 # Data: Python float.
 SCALAR_CONST = "scalar_const"

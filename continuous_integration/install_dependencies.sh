@@ -4,46 +4,27 @@
 # variables defined in the build.yml in .github/workflows/.
 
 set -e
-
-conda config --set remote_connect_timeout_secs 30.0
-conda config --set remote_max_retries 10
-conda config --set remote_backoff_factor 2
-conda config --set remote_read_timeout_secs 120.0
-
-if [[ "$PYTHON_VERSION" == "3.6" ]] || [[ "$PYTHON_VERSION" == "3.7" ]] || [[ "$PYTHON_VERSION" == "3.8" ]]; then
-  conda install scipy=1.3 numpy=1.16 mkl pip pytest lapack ecos scs osqp cvxopt
-  python -m pip install cplex  # CPLEX is not available yet on 3.9
-elif [[ "$PYTHON_VERSION" == "3.9" ]]; then
-  # The earliest version of numpy that works is 1.19.
-  # Given numpy 1.19, the earliest version of scipy we can use is 1.5.
-  conda install scipy=1.5 numpy=1.19 mkl pip pytest lapack ecos scs osqp cvxopt
+uv venv
+if [[ "$RUNNER_OS" == "Windows" ]]; then
+  . .venv/Scripts/activate
+else
+  . .venv/bin/activate
 fi
 
-# CBC comes with wheels for windows and needs coin-or-cbc to compile otherwise
-# conda-forge in progress: https://github.com/conda-forge/staged-recipes/pull/14950
-if [[ "$RUNNER_OS" != "Windows" ]]; then
-  conda install coin-or-cbc
-fi
-if [[ "$PYTHON_VERSION" != "3.6" ]] && [[ "$RUNNER_OS" != "Windows" ]]; then
-  python -m pip install cylp
+#if  [[ "$RUNNER_OS" == "Linux" ]]; then 
+#  sudo apt install openblas
+#fi
+
+uv pip install pytest pytest-cov hypothesis "setuptools>65.5.1"
+
+uv pip install scs clarabel osqp highspy
+
+if [[ "$RUNNER_OS" != "macOS" ]]; then
+  uv pip install mkl
 fi
 
-# SCIP only works with scipy >= 1.5 due to dependency conflicts when installing on Linux/macOS
-if [[ "$PYTHON_VERSION" == "3.9" ]] || [[ "$RUNNER_OS" == "Windows" ]]; then
-  conda install pyscipopt
-fi
+uv pip install scipy numpy
 
-python -m pip install diffcp gurobipy xpress
-
-# Only install Mosek if license is available (secret is not copied to forks)
-if [[ -n "$MOSEK_CI_BASE64" ]]; then
-    python -m pip install mosek
-fi
-
-if [[ "$USE_OPENMP" == "True" ]]; then
-  conda install -c conda-forge openmp
-fi
-
-if [[ "$COVERAGE" == "True" ]]; then
-  python -m pip install coverage coveralls
-fi
+#if [[ "$USE_OPENMP" == "True" ]]; then
+  #uv pip install openmp
+#fi

@@ -23,6 +23,7 @@ import cvxpy.settings as s
 from cvxpy.constraints import SOC, NonNeg, Zero
 from cvxpy.reductions.solution import Solution, failure_solution
 from cvxpy.reductions.solvers.conic_solvers.conic_solver import ConicSolver
+from cvxpy.utilities.citations import CITATION_DICT
 
 
 class NAG(ConicSolver):
@@ -31,6 +32,7 @@ class NAG(ConicSolver):
 
     MIP_CAPABLE = False
     SUPPORTED_CONSTRAINTS = ConicSolver.SUPPORTED_CONSTRAINTS + [SOC]
+    REQUIRED_MODULES = ("naginterfaces.library.opt",)
 
     # Map of NAG status to CVXPY status
     STATUS_MAP = {0: s.OPTIMAL,
@@ -45,13 +47,17 @@ class NAG(ConicSolver):
     def import_solver(self) -> None:
         """Imports the solver.
         """
-        from naginterfaces.library import opt
-        opt  # For flake8
+        from naginterfaces.library import opt  # noqa F401
 
     def name(self):
         """The name of the solver.
         """
         return s.NAG
+
+    def supports_quad_obj(self) -> bool:
+        """NAG supports quadratic objective.
+        """
+        return True
 
     def accepts(self, problem) -> bool:
         """Can NAG solve the problem?
@@ -77,15 +83,17 @@ class NAG(ConicSolver):
         data = dict()
         inv_data = dict()
         inv_data[self.VAR_ID] = problem.x.id
-
-        if not problem.formatted:
-            problem = self.format_constraints(problem, None)
         data[s.PARAM_PROB] = problem
         data[self.DIMS] = problem.cone_dims
         inv_data[self.DIMS] = problem.cone_dims
         constr_map = problem.constr_map
 
-        c, d, A, b = problem.apply_parameters()
+        if problem.P is None:
+            c, d, A, b = problem.apply_parameters()
+        else:
+            P, c, d, A, b = problem.apply_parameters(quad_obj=True)
+            data[s.P] = P
+
         A = -A
         data[s.C] = c.ravel()
         data[s.OBJ_OFFSET] = float(d)
@@ -128,7 +136,7 @@ class NAG(ConicSolver):
         if Gs:
             data[s.G] = sp.sparse.vstack(tuple(Gs))
         else:
-            data[s.G] = sp.sparse.csc_matrix((0, 0))
+            data[s.G] = sp.sparse.csc_array((0, 0))
         if hs:
             data[s.H] = np.hstack(tuple(hs))
         else:
@@ -192,13 +200,25 @@ class NAG(ConicSolver):
         nleq = dims[s.LEQ_DIM]
         neq = dims[s.EQ_DIM]
         m = len(h)
-        # declare the NAG problem handle
+        # Declare the NAG problem handle
         handle = opt.handle_init(nvar)
 
-        # define the linear objective
         cvec = np.concatenate((c, np.zeros(soc_dim)))
-        opt.handle_set_linobj(handle, cvec)
-        # define linear constraints
+
+        # Define quadratic objective if it exists
+        if s.P in data:
+            P = data[s.P]
+            Put = sp.sparse.csc_array(sp.sparse.triu(P, format='csc'))
+            Prows, Pcols, Pvals = sp.sparse.find(Put)
+            Prows = Prows + 1
+            Pcols = Pcols + 1
+            idxc = np.arange(1, len(cvec)+1)
+            opt.handle_set_quadobj(handle, idxc, cvec, Prows, Pcols, Pvals)
+        # Define linear objective
+        else:
+            opt.handle_set_linobj(handle, cvec)
+
+        # Define linear constraints
         rows, cols, vals = sp.sparse.find(G)
         lb = np.zeros(m)
         ub = np.zeros(m)
@@ -215,7 +235,7 @@ class NAG(ConicSolver):
         cols = cols + 1
         opt.handle_set_linconstr(handle, lb, ub, rows, cols, vals)
 
-        # define the cones
+        # Define the cones
         idx = len(c)
         size_cdvars = 0
         if soc_dim > 0:
@@ -226,12 +246,16 @@ class NAG(ConicSolver):
                 idx += size_cone
                 size_cdvars += size_cone
 
-        # deactivate printing by default
+        # Deactivate printing by default
         opt.handle_opt_set(handle, "Print File = -1")
         if verbose:
             opt.handle_opt_set(handle, "Monitoring File = 6")
             opt.handle_opt_set(handle, "Monitoring Level = 2")
 
+
+        # use_quad_obj is only for canonicalization
+        if "use_quad_obj" in solver_opts:
+            del solver_opts["use_quad_obj"]
         # Set the optional parameters
         kwargs = sorted(solver_opts.keys())
         if "nag_params" in kwargs:
@@ -255,7 +279,7 @@ class NAG(ConicSolver):
         u = np.zeros(2*m)
         uc = np.zeros(size_cdvars)
         try:
-            if soc_dim > 0:
+            if soc_dim > 0 or s.P in data:
                 sln = opt.handle_solve_socp_ipm(handle, x=x, u=u, uc=uc, io_manager=iom)
             elif soc_dim == 0:
                 sln = opt.handle_solve_lp_ipm(handle, x=x, u=u, io_manager=iom)
@@ -267,3 +291,13 @@ class NAG(ConicSolver):
         opt.handle_free(handle)
 
         return {'status': status, 'sln': sln}
+
+    def cite(self, data):
+        """Returns bibtex citation for the solver.
+
+        Parameters
+        ----------
+        data : dict
+            Data generated via an apply call.
+        """
+        return CITATION_DICT["NAG"]

@@ -179,3 +179,36 @@ class TestExpressions(BaseTest):
         self.assertFalse(s.is_affine())
         self.assertTrue(s.is_quadratic())
         self.assertFalse(s.is_dcp())
+
+    def test_has_quadratic(self) -> None:
+        """Test the has_quadratic_term function."""
+        x = Variable()
+        assert not x.has_quadratic_term()
+        assert not (3 + 3*x).has_quadratic_term()
+        assert (x**2).has_quadratic_term()
+        assert (x**2/2).has_quadratic_term()
+        assert (x**2 + x**3).has_quadratic_term()
+        assert (2*x**2 + x**3).has_quadratic_term()
+        assert cp.conj(x**2).has_quadratic_term()
+        assert not cp.pos(x**2).has_quadratic_term()
+        assert cp.square(x**2).has_quadratic_term()
+        assert cp.huber(x**3).has_quadratic_term()
+        assert cp.power(x**2, 1).has_quadratic_term()
+        assert cp.quad_over_lin(x**3, 1).has_quadratic_term()
+        assert not cp.quad_over_lin(x**3, x).has_quadratic_term()
+        y = cp.Variable(2)
+        P = np.eye(2)
+        assert cp.matrix_frac(y**3, P).has_quadratic_term()
+        P = cp.Parameter((2, 2), PSD=True)
+        assert cp.matrix_frac(y**3, P).has_quadratic_term()
+
+    def test_composite_quad_over_lin(self) -> None:
+        """Test sum_squares(x) + quad_over_lin(x, y)"""
+        # https://github.com/cvxpy/cvxpy/issues/2773
+        x = cp.Variable()
+        y = cp.Variable()
+        obj = cp.Minimize(cp.square(y) + cp.quad_over_lin(x, y))
+        prob = cp.Problem(obj, [y == 1])
+        prob.solve(solver=cp.CLARABEL, use_quad_obj=True)
+        assert np.isclose(y.value, 1)
+        assert np.isclose(x.value, 0)

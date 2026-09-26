@@ -1,11 +1,13 @@
 CVXPY
 =====================
-[![Build Status](http://github.com/cvxpy/cvxpy/workflows/build/badge.svg?event=push)](https://github.com/cvxpy/cvxpy/actions/workflows/build.yml)
+[![Build Status](https://github.com/cvxpy/cvxpy/actions/workflows/build.yml/badge.svg?event=push)](https://github.com/cvxpy/cvxpy/actions/workflows/build.yml)
 ![PyPI - downloads](https://img.shields.io/pypi/dm/cvxpy.svg?label=Pypi%20downloads)
 ![Conda - downloads](https://img.shields.io/conda/dn/conda-forge/cvxpy.svg?label=Conda%20downloads)
+[![Discord](https://img.shields.io/badge/Chat-Discord-Blue?color=5865f2)](https://discord.gg/4urRQeGBCr)
+[![Benchmarks](http://img.shields.io/badge/benchmarked%20by-asv-blue.svg?style=flat)](https://cvxpy.github.io/benchmarks/)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/cvxpy/cvxpy/badge)](https://api.securityscorecards.dev/projects/github.com/cvxpy/cvxpy)
 
-
-**The CVXPY documentation is at [cvxpy.org](http://www.cvxpy.org/).**
+**The CVXPY documentation is at [cvxpy.org](https://www.cvxpy.org/).**
 
 *We are building a CVXPY community on [Discord](https://discord.gg/4urRQeGBCr). Join the conversation! For issues and long-form discussions, use [Github Issues](https://github.com/cvxpy/cvxpy/issues) and [Github Discussions](https://github.com/cvxpy/cvxpy/discussions).*
 
@@ -23,7 +25,7 @@ CVXPY is a Python-embedded modeling language for convex optimization problems. I
 
 For example, the following code solves a least-squares problem where the variable is constrained by lower and upper bounds:
 
-```python3
+```python
 import cvxpy as cp
 import numpy
 
@@ -52,13 +54,14 @@ print(constraints[0].dual_value)
 With CVXPY, you can model
 * convex optimization problems,
 * mixed-integer convex optimization problems,
-* geometric programs, and
-* quasiconvex programs.
+* geometric programs,
+* quasiconvex programs, and
+* nonlinear programs
 
-CVXPY is not a solver. It relies upon the open source solvers
-[ECOS](http://github.com/ifa-ethz/ecos), [SCS](https://github.com/bodono/scs-python),
-and [OSQP](https://github.com/oxfordcontrol/osqp). Additional solvers are
-[available](https://www.cvxpy.org/tutorial/advanced/index.html#choosing-a-solver),
+CVXPY is not a solver. It relies upon the open source solvers 
+[Clarabel](https://github.com/oxfordcontrol/Clarabel.rs), [SCS](https://github.com/bodono/scs-python),
+[OSQP](https://github.com/oxfordcontrol/osqp) and [HiGHS](https://github.com/ERGO-Code/HiGHS).
+Additional solvers are [available](https://www.cvxpy.org/tutorial/solvers/index.html#choosing-a-solver),
 but must be installed separately.
 
 CVXPY began as a Stanford University research project. It is now developed by
@@ -67,23 +70,25 @@ many people, across many institutions and countries.
 
 ## Installation
 CVXPY is available on PyPI, and can be installed with
-```
+```bash
 pip install cvxpy
 ```
 
 CVXPY can also be installed with conda, using
-```
+```bash
 conda install -c conda-forge cvxpy
 ```
 
 CVXPY has the following dependencies:
 
-- Python >= 3.6
-- OSQP >= 0.4.1
-- ECOS >= 2
-- SCS >= 1.1.6
-- NumPy >= 1.15
-- SciPy >= 1.1.0
+- Python >= 3.11
+- Clarabel >= 0.5.0
+- OSQP >= 1.0.0
+- SCS >= 3.2.4.post1
+- NumPy >= 2.0.0
+- SciPy >= 1.13.0
+- highspy >= 1.11.0
+- sparsediffpy >= 0.2.2
 
 For detailed instructions, see the [installation
 guide](https://www.cvxpy.org/install/index.html).
@@ -118,8 +123,8 @@ Here are some simple ways to start contributing immediately:
 * Read the CVXPY source code and improve the documentation, or address TODOs
 * Enhance the [website documentation](https://github.com/cvxpy/cvxpy/tree/master/doc)
 * Browse the [issue tracker](https://github.com/cvxpy/cvxpy/issues), and look for issues tagged as "help wanted"
-* Polish the [example library](https://github.com/cvxpy/cvxpy/tree/master/examples)
-* Add a [benchmark](https://github.com/cvxpy/cvxpy/tree/master/cvxpy/tests/test_benchmarks.py)
+* Polish the [example library](https://github.com/cvxpy/examples)
+* Add a [benchmark](https://github.com/cvxpy/benchmarks)
 
 If you'd like to add a new example to our library, or implement a new feature,
 please get in touch with us first to make sure that your priorities align with
@@ -137,13 +142,17 @@ researchers and engineers.
 
 CVXPY is developed and maintained by [Steven
 Diamond](https://stevendiamond.me/), [Akshay
-Agrawal](https://akshayagrawal.com), [Riley Murray](https://rileyjmurray.wordpress.com/), and [Bartolomeo Stellato](https://stellato.io/), with many others contributing
-significantly. A non-exhaustive list of people who have shaped CVXPY over the
-years includes Stephen Boyd, Eric Chu, Robin Verschueren, Philipp Schiele, Michael Sommerauer,
-Jaehyun Park, Enzo Busseti, AJ Friend, Judson Wilson, and Chris
-Dembia.
+Agrawal](https://akshayagrawal.com), [Riley Murray](https://rileyjmurray.wordpress.com/), 
+[Philipp Schiele](https://www.philippschiele.com/),
+[Bartolomeo Stellato](https://stellato.io/),
+and [Parth Nobel](https://ptnobel.github.io), with many others contributing
+significantly.
+A non-exhaustive list of people who have shaped CVXPY over the
+years includes Stephen Boyd, Eric Chu, Robin Verschueren,
+Jaehyun Park, Enzo Busseti, AJ Friend, Judson Wilson, Chris Dembia, and
+William Zhang.
 
 For more information about the team and our processes, see our [governance document](https://github.com/cvxpy/org/blob/main/governance.md).
 
 ## Citing
-If you use CVXPY for academic work, we encourage you to [cite our papers](https://www.cvxpy.org/citing/index.html). If you use CVXPY in industry, we'd love to hear from you as well, on Discord or over email.
+If you use CVXPY for academic work, we encourage you to [cite our papers](https://www.cvxpy.org/resources/citing/index.html). If you use CVXPY in industry, we'd love to hear from you as well, on Discord or over email.

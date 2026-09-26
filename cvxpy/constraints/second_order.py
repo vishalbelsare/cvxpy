@@ -14,16 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from typing import List
 
 import numpy as np
 
-from cvxpy.constraints.constraint import Constraint
+from cvxpy.constraints.cones import Cone
 from cvxpy.expressions import cvxtypes
 from cvxpy.utilities import scopes
 
 
-class SOC(Constraint):
+class SOC(Cone):
     """A second-order cone constraint for each row/column.
 
     Assumes ``t`` is a vector the same length as ``X``'s columns (rows) for
@@ -36,7 +35,7 @@ class SOC(Constraint):
     """
 
     def __init__(self, t, X, axis: int = 0, constr_id=None) -> None:
-        t = cvxtypes.expression().cast_to_const(t)
+        t = cvxtypes.expression().cast(t)
         if len(t.shape) >= 2 or not t.is_real():
             raise ValueError("Invalid first argument.")
         # Check t has one entry per cone.
@@ -49,33 +48,70 @@ class SOC(Constraint):
             )
         self.axis = axis
         if len(t.shape) == 0:
-            t = t.flatten()
+            t = t.flatten(order='F')
         super(SOC, self).__init__([t, X], constr_id)
 
     def __str__(self) -> str:
         return "SOC(%s, %s)" % (self.args[0], self.args[1])
 
     @property
-    def residual(self):
+    def residual(self) -> np.ndarray | None:
+        """
+        For each cone, returns:
+
+        ||(t,X) - proj(t,X)||
+        with
+        proj(t,X) = (t,X)                       if t >= ||x||
+                    0.5*(t/||x|| + 1)(||x||,x)  if -||x|| < t < ||x||
+                    0                           if t <= -||x||
+
+        References:
+             https://docs.mosek.com/modeling-cookbook/practical.html#distance-to-a-cone
+             https://math.stackexchange.com/questions/2509986/projection-onto-the-second-order-cone
+        """
+
         t = self.args[0].value
         X = self.args[1].value
         if t is None or X is None:
             return None
+
+        # Convert scalars to arrays for uniform handling
+        t = np.atleast_1d(t)
+        X = np.atleast_1d(X)
+
+        # Reduce axis = 0 to axis = 1.
         if self.axis == 0:
             X = X.T
+
+        promoted = X.ndim == 1
+        X = np.atleast_2d(X)
+
+        # Initializing with zeros makes "0 if t <= -||x||" the default case for the projection
+        t_proj = np.zeros(t.shape)
+        X_proj = np.zeros(X.shape)
+
         norms = np.linalg.norm(X, ord=2, axis=1)
-        zero_indices = np.where(X <= -t)[0]
-        averaged_indices = np.where(X >= np.abs(t))[0]
-        X_proj = np.array(X)
-        t_proj = np.array(t)
-        X_proj[zero_indices] = 0
-        t_proj[zero_indices] = 0
+
+        # 1. proj(t,X) = (t,X) if t >= ||x||
+        t_geq_x_norm = t >= norms
+        t_proj[t_geq_x_norm] = t[t_geq_x_norm]
+        X_proj[t_geq_x_norm] = X[t_geq_x_norm]
+
+        # 2. proj(t,X) = 0.5*(t/||x|| + 1)(||x||,x)  if -||x|| < t < ||x||
+        abs_t_less_x_norm = np.abs(t) < norms
         avg_coeff = 0.5 * (1 + t/norms)
-        X_proj[averaged_indices] = avg_coeff * X[averaged_indices]
-        t_proj[averaged_indices] = avg_coeff * t[averaged_indices]
-        return np.linalg.norm(np.concatenate([X, t], axis=1) -
-                              np.concatenate([X_proj, t_proj], axis=1),
-                              ord=2, axis=1)
+        X_proj[abs_t_less_x_norm] = avg_coeff[abs_t_less_x_norm, None] * X[abs_t_less_x_norm]
+        t_proj[abs_t_less_x_norm] = avg_coeff[abs_t_less_x_norm] * norms[abs_t_less_x_norm]
+
+        Xt = np.concatenate([X, t[:, None]], axis=1)
+        Xt_proj = np.concatenate([X_proj, t_proj[:, None]], axis=1)
+        resid = np.linalg.norm(Xt - Xt_proj, ord=2, axis=1)
+
+        # Demote back to 1D.
+        if promoted:
+            return resid[0]
+        else:
+            return resid
 
     def get_data(self):
         """Returns info needed to reconstruct the object besides the args.
@@ -84,21 +120,31 @@ class SOC(Constraint):
         -------
         list
         """
-        return [self.axis]
+        return [self.axis, self.id]
 
     def num_cones(self):
         """The number of elementwise cones.
         """
         return self.args[0].size
 
+    def _cone_size(self) -> int:
+        """The size of each second-order cone (1 + dimension of X).
+        """
+        X = self.args[1]
+        if len(X.shape) == 0:
+            X_dim = 1
+        else:
+            # X is 2D or 1D with axis = 0.
+            X_dim = X.shape[self.axis]
+        return 1 + X_dim
+
     @property
     def size(self) -> int:
         """The number of entries in the combined cones.
         """
-        cone_size = 1 + self.args[1].shape[self.axis]
-        return cone_size * self.num_cones()
+        return self._cone_size() * self.num_cones()
 
-    def cone_sizes(self) -> List[int]:
+    def cone_sizes(self) -> list[int]:
         """The dimensions of the second-order cones.
 
         Returns
@@ -106,8 +152,7 @@ class SOC(Constraint):
         list
             A list of the sizes of the elementwise cones.
         """
-        cone_size = 1 + self.args[1].shape[self.axis]
-        return [cone_size] * self.num_cones()
+        return [self._cone_size()] * self.num_cones()
 
     def is_dcp(self, dpp: bool = False) -> bool:
         """An SOC constraint is DCP if each of its arguments is affine.
@@ -124,11 +169,173 @@ class SOC(Constraint):
         return self.is_dcp()
 
     def save_dual_value(self, value) -> None:
-        cone_size = 1 + self.args[1].shape[self.axis]
-        value = np.reshape(value, newshape=(-1, cone_size))
+        cone_size = self._cone_size()
+        value = np.reshape(value, (-1, cone_size))
         t = value[:, 0]
         X = value[:, 1:]
-        if self.axis == 0:
+        if len(self.args[1].shape) == 0:
+            # Scalar X: extract scalar from 2D array
+            X = X[0, 0]
+        elif self.axis == 0:
             X = X.T
         self.dual_variables[0].save_value(t)
         self.dual_variables[1].save_value(X)
+
+    def _dual_cone(self, *args):
+        """Implements the dual cone of the second-order cone
+        See Pg 85 of the MOSEK modelling cookbook for more information"""
+        if not args:
+            return SOC(self.dual_variables[0], self.dual_variables[1], self.axis)
+        else:
+            # some assertions for verifying `args`
+            args_shapes = [arg.shape for arg in args]
+            instance_args_shapes = [arg.shape for arg in self.args]
+            assert len(args) == len(self.args)
+            assert args_shapes == instance_args_shapes
+            return SOC(args[0], args[1], self.axis)
+
+
+class RSOC(Cone):
+    """A rotated second-order cone constraint.
+
+    Represents the constraint:
+
+        2*t*u >= ||x||_2^2,  t >= 0,  u >= 0
+
+    where x is a vector and t, u are scalars. Supports batching:
+    if X is a matrix, t and u are vectors, the constraint is applied
+    column-wise (axis=0) or row-wise (axis=1) to each column of X.
+
+    Parameters
+    ----------
+    t : Expression
+        The first scalar part (or vector for batched constraints).
+    u : Expression
+        The second scalar part (or vector for batched constraints).
+    X : Expression
+        The vector (or matrix) part of the constraint.
+    axis : int
+        Axis along which to apply the constraint (0 = column-wise, 1 = row-wise).
+    """
+
+    def __init__(self, t, u, X, axis: int = 0, constr_id=None) -> None:
+        Expression = cvxtypes.expression()
+        t = Expression.cast(t)
+        u = Expression.cast(u)
+        X = Expression.cast(X)
+
+        if not t.is_real() or not u.is_real():
+            raise ValueError("t and u must be real.")
+
+        # Scalar case
+        if u.ndim == 0 or u.size == 1:
+            if t.size != 1:
+                raise ValueError("t and u must have the same shape.")
+        else:
+            # Batched case: t and u must have the same shape
+            if t.shape != u.shape:
+                raise ValueError("t and u must have the same shape.")
+            # X must be 2D with matching number of columns/rows
+            if X.ndim < 2:
+                raise ValueError(
+                    "X must be a matrix for batched RSOC constraints.")
+            n_cones = u.size
+            if axis == 0 and X.shape[1] != n_cones:
+                raise ValueError(
+                    "Number of columns of X must match size of t and u.")
+            if axis == 1 and X.shape[0] != n_cones:
+                raise ValueError(
+                    "Number of rows of X must match size of t and u.")
+
+        self.axis = axis
+        super(RSOC, self).__init__([t, u, X], constr_id)
+
+    def __str__(self) -> str:
+        return "RSOC(%s, %s, %s)" % (self.args[0], self.args[1], self.args[2])
+
+    def num_cones(self):
+        """The number of RSOC constraints (1 for scalar, n for batched)."""
+        return self.args[1].size
+
+    @property
+    def residual(self):
+        """Returns the residual of the constraint."""
+        t = self.args[0].value
+        u = self.args[1].value
+        X = self.args[2].value
+        if X is None or t is None or u is None:
+            return None
+        X = np.atleast_1d(np.array(X, dtype=float))
+        t = np.atleast_1d(np.array(t, dtype=float)).ravel()
+        u = np.atleast_1d(np.array(u, dtype=float)).ravel()
+        if X.ndim == 1:
+            X = X.reshape(-1, 1)
+        if self.axis == 1:
+            X = X.T
+        # After any transpose, X is (n_x, n_cones); always sum over axis=0
+        norms_sq = np.sum(X ** 2, axis=0)  # shape (n_cones,)
+        lhs = 2 * t * u
+        viol_cone = norms_sq - lhs          # > 0 means violated
+        viol_t = -t                          # > 0 means t < 0
+        viol_u = -u                          # > 0 means u < 0
+        residuals = np.maximum(0.0, np.maximum(viol_cone, np.maximum(viol_t, viol_u)))
+        return residuals[0] if residuals.size == 1 else residuals
+
+    def save_dual_value(self, value) -> None:
+        n_cones = self.args[1].size
+        if isinstance(value, (list, tuple)):
+            # recover_dual returns [dt_dual (n_cones,), du_dual (n_cones,),
+            # dX_dual (n_cones, n_x)]
+            dt = np.asarray(value[0])   # (n_cones,)
+            du = np.asarray(value[1])   # (n_cones,)
+            dx = np.asarray(value[2])   # (n_cones, n_x) or (n_x, n_cones) depending on axis
+        else:
+            raise ValueError(
+                "RSOC.save_dual_value expects a list [dt, du, dX] from recover_dual, "
+                f"got {type(value).__name__}."
+            )
+        if n_cones == 1:
+            # Scalar case: squeeze to match primal shapes
+            self.dual_variables[0].save_value(dt[0])   # scalar
+            self.dual_variables[1].save_value(du[0])   # scalar
+            self.dual_variables[2].save_value(dx[0])   # (n_x,)
+        else:
+            # Batched case: dx is (n_cones, n_x). Match the orientation of X.
+            self.dual_variables[0].save_value(dt)
+            self.dual_variables[1].save_value(du)
+            if self.axis == 1:
+                self.dual_variables[2].save_value(dx)
+            else:
+                self.dual_variables[2].save_value(dx.T)
+
+    def get_data(self):
+        return [self.axis, self.id]
+
+    def is_dcp(self, dpp: bool = False) -> bool:
+        """An RSOC constraint is DCP if all arguments are affine."""
+        if dpp:
+            with scopes.dpp_scope():
+                return all(arg.is_affine() for arg in self.args)
+        return all(arg.is_affine() for arg in self.args)
+
+    def is_dgp(self, dpp: bool = False) -> bool:
+        return False
+
+    def is_dqcp(self) -> bool:
+        return self.is_dcp()
+
+    def _dual_cone(self, *args):
+        """The dual cone of the RSOC is itself (self-dual)."""
+        if not args:
+            return RSOC(
+                self.dual_variables[0],
+                self.dual_variables[1],
+                self.dual_variables[2],
+                self.axis,
+            )
+        else:
+            args_shapes = [arg.shape for arg in args]
+            instance_args_shapes = [arg.shape for arg in self.args]
+            assert len(args) == len(self.args)
+            assert args_shapes == instance_args_shapes
+            return RSOC(args[0], args[1], args[2], self.axis)

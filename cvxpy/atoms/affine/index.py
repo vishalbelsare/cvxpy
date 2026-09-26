@@ -13,7 +13,6 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-from typing import List, Tuple
 
 import numpy as np
 import scipy.sparse as sp
@@ -25,6 +24,7 @@ from cvxpy.atoms.affine.reshape import reshape
 from cvxpy.atoms.affine.vec import vec
 from cvxpy.constraints.constraint import Constraint
 from cvxpy.expressions.expression import Expression
+from cvxpy.utilities import bounds as bounds_utils
 from cvxpy.utilities import key_utils as ku
 
 
@@ -40,7 +40,19 @@ class index(AffAtom):
     expr : Expression
         The expression indexed/sliced into.
     key :
-        The index/slicing key (i.e. expr[key[0],key[1]]).
+        The index/slicing key (i.e. expr[key[0],key[1]])
+
+    Examples
+    --------
+    >>> import cvxpy as cp
+    >>> import numpy as np
+    >>> x = cp.Variable((2, 3, 4))
+    >>> x[..., 2].shape
+    (2, 3)
+    >>> x[..., np.newaxis].shape
+    (2, 3, 4, 1)
+    >>> x[1, 2].shape
+    (4,)
     """
 
     def __init__(self, expr, key, orig_key=None) -> None:
@@ -54,39 +66,45 @@ class index(AffAtom):
         super(index, self).__init__(expr)
 
     def is_atom_log_log_convex(self) -> bool:
-        """Is the atom log-log convex?
-        """
+        """Is the atom log-log convex?"""
         return True
 
     def is_atom_log_log_concave(self) -> bool:
-        """Is the atom log-log concave?
-        """
+        """Is the atom log-log concave?"""
         return True
 
-    # The string representation of the atom.
+    def bounds_from_args(self) -> tuple[np.ndarray, np.ndarray]:
+        """Returns bounds for indexed expression."""
+        lb, ub = self.args[0].get_bounds()
+        return bounds_utils.index_bounds(lb, ub, self._orig_key)
+
     def name(self):
-        # TODO string should be orig_key
+        """String representation of the index expression."""
         inner_str = "[%s" + ", %s"*(len(self.key)-1) + "]"
         return self.args[0].name() + inner_str % ku.to_str(self.key)
 
+    def format_labeled(self):
+        """Labeled representation of the index expression."""
+        if self._label is not None:
+            return self._label
+        inner_str = "[%s" + ", %s"*(len(self.key)-1) + "]"
+        return self.args[0].format_labeled() + inner_str % ku.to_str(self.key)
+
     def numeric(self, values):
-        """ Returns the index/slice into the given value.
-        """
+        """Returns the index/slice into the given value."""
         return values[0][self._orig_key]
 
-    def shape_from_args(self) -> Tuple[int, ...]:
-        """Returns the shape of the index expression.
-        """
+    def shape_from_args(self) -> tuple[int, ...]:
+        """Returns the shape of the index expression."""
         return ku.shape(self.key, self._orig_key, self.args[0].shape)
 
-    def get_data(self):
-        """Returns the (row slice, column slice).
-        """
+    def get_data(self) -> list:
+        """Returns the (row slice, column slice)."""
         return [self.key, self._orig_key]
 
     def graph_implementation(
-        self, arg_objs, shape: Tuple[int, ...], data=None
-    ) -> Tuple[lo.LinOp, List[Constraint]]:
+        self, arg_objs, shape: tuple[int, ...], data=None
+    ) -> tuple[lo.LinOp, list[Constraint]]:
         """Index/slice into the expression.
 
         Parameters
@@ -97,11 +115,6 @@ class index(AffAtom):
             The shape of the resulting expression.
         data : tuple
             A tuple of slices.
-
-        Returns
-        -------
-        tuple
-            (LinOp, [constraints])
         """
         obj = lu.index(arg_objs[0], shape, data[0])
         return (obj, [])
@@ -118,10 +131,15 @@ class special_index(AffAtom):
         ndarrays or lists.
     """
 
+    def bounds_from_args(self) -> tuple[np.ndarray, np.ndarray]:
+        """Returns bounds for special indexed expression."""
+        lb, ub = self.args[0].get_bounds()
+        return bounds_utils.index_bounds(lb, ub, self.key)
+
     def __init__(self, expr: Expression, key) -> None:
         self.key = key
         # Order the entries of expr and select them using key.
-        expr = index.cast_to_const(expr)
+        expr = index.cast(expr)
         idx_mat = np.arange(expr.size)
         idx_mat = np.reshape(idx_mat, expr.shape, order='F')
         self._select_mat = idx_mat[key]
@@ -138,45 +156,50 @@ class special_index(AffAtom):
         """
         return True
 
-    # The string representation of the atom.
-    def name(self):
-        return self.args[0].name() + str(self.key)
+    def name(self) -> str:
+        """String representation of the special index expression."""
+        key_str = ku.special_key_to_str(self.key)
+        return f"{self.args[0].name()}[{key_str}]"
+
+    def format_labeled(self) -> str:
+        if self._label is not None:
+            return self._label
+        key_str = ku.special_key_to_str(self.key)
+        return f"{self.args[0].format_labeled()}[{key_str}]"
 
     def numeric(self, values):
-        """ Returns the index/slice into the given value.
+        """Returns the index/slice into the given value.
         """
         return values[0][self.key]
 
-    def shape_from_args(self) -> Tuple[int, ...]:
-        """Returns the shape of the index expression.
-        """
+    def shape_from_args(self) -> tuple[int, ...]:
+        """Returns the shape of the index expression."""
         return self._shape
 
-    def get_data(self):
-        """Returns the key.
-        """
+    def get_data(self) -> list:
+        """Returns the key."""
         return [self.key]
 
     @property
-    def grad(self):
+    def grad(self) -> list[sp.csc_array] | None:
         """Gives the (sub/super)gradient of the expression w.r.t. each variable.
 
         Matrix expressions are vectorized, so the gradient is a matrix.
         None indicates variable values unknown or outside domain.
-
-        Returns:
-            A map of variable to SciPy CSC sparse matrix or None.
         """
-        select_vec = np.reshape(
-          self._select_mat, self._select_mat.size, order='F')
-        identity = sp.eye(self.args[0].size).tocsc()
+        select_vec = np.reshape(self._select_mat, self._select_mat.size, order='F')
+        identity = sp.eye_array(self.args[0].size, format='csc')
         lowered = reshape(
-          identity[select_vec] @ vec(self.args[0]), self._shape)
+            identity[select_vec] @ vec(self.args[0], order='F'),
+            self._shape,
+            order='F'
+        )
         return lowered.grad
 
-    def graph_implementation(
-        self, arg_objs, shape: Tuple[int, ...], data=None
-    ) -> Tuple[lo.LinOp, List[Constraint]]:
+    def graph_implementation(self,
+                            arg_objs: list,
+                            shape: tuple[int, ...],
+                            data=None) -> tuple[lo.LinOp, list[Constraint]]:
         """Index/slice into the expression.
 
         Parameters
@@ -187,18 +210,13 @@ class special_index(AffAtom):
             The shape of the resulting expression.
         data : tuple
             A tuple of slices.
-
-        Returns
-        -------
-        tuple
-            (LinOp, [constraints])
         """
         select_mat = self._select_mat
         final_shape = self._select_mat.shape
         select_vec = np.reshape(select_mat, select_mat.size, order='F')
         # Select the chosen entries from expr.
         arg = arg_objs[0]
-        identity = sp.eye(self.args[0].size).tocsc()
+        identity = sp.eye_array(self.args[0].size, format='csc')
         vec_arg = lu.reshape(arg, (self.args[0].size,))
         mul_mat = identity[select_vec]
         mul_const = lu.create_const(mul_mat, mul_mat.shape, sparse=True)

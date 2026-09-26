@@ -15,12 +15,14 @@ limitations under the License.
 """
 
 
-from typing import Tuple
 
 import numpy
 import scipy.sparse
 
 from .. import base_matrix_interface as base
+
+# Possible types for complex data.
+COMPLEX_TYPES = [complex, numpy.complex64, numpy.complex128]
 
 
 class NDArrayInterface(base.BaseMatrixInterface):
@@ -40,14 +42,14 @@ class NDArrayInterface(base.BaseMatrixInterface):
             A matrix of type self.target_matrix or a scalar.
         """
         if scipy.sparse.issparse(value):
-            result = value.A
+            result = value.toarray()
         elif isinstance(value, numpy.matrix):
-            result = value.A
+            result = numpy.asarray(value)
         elif isinstance(value, list):
             result = numpy.asarray(value).T
         else:
             result = numpy.asarray(value)
-        if result.dtype in [complex, numpy.float64]:
+        if result.dtype in [numpy.float64] + COMPLEX_TYPES:
             return result
         else:
             return result.astype(numpy.float64)
@@ -57,7 +59,7 @@ class NDArrayInterface(base.BaseMatrixInterface):
         return numpy.eye(size)
 
     # Return the dimensions of the matrix.
-    def shape(self, matrix) -> Tuple[int, ...]:
+    def shape(self, matrix) -> tuple[int, ...]:
         return tuple(int(d) for d in matrix.shape)
 
     def size(self, matrix):
@@ -70,7 +72,7 @@ class NDArrayInterface(base.BaseMatrixInterface):
         return matrix.item()
 
     # A matrix with all entries equal to the given scalar value.
-    def scalar_matrix(self, value, shape: Tuple[int, ...]):
+    def scalar_matrix(self, value, shape: tuple[int, ...]):
         return numpy.zeros(shape, dtype='float64') + value
 
     def reshape(self, matrix, size):

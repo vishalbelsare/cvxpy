@@ -14,28 +14,35 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from __future__ import division
-
 import operator as op
 from functools import reduce
-from typing import List, Tuple
 
 import numpy as np
 import scipy.sparse as sp
 
-import cvxpy.interface as intf
 import cvxpy.lin_ops.lin_op as lo
 import cvxpy.lin_ops.lin_utils as lu
 import cvxpy.utilities as u
 from cvxpy.atoms.affine.add_expr import AddExpression
 from cvxpy.atoms.affine.affine_atom import AffAtom
+from cvxpy.atoms.affine.broadcast_to import broadcast_to
 from cvxpy.atoms.affine.conj import conj
-from cvxpy.atoms.affine.reshape import deep_flatten
+from cvxpy.atoms.affine.reshape import deep_flatten, reshape
 from cvxpy.atoms.affine.sum import sum as cvxpy_sum
 from cvxpy.constraints.constraint import Constraint
 from cvxpy.error import DCPError
-from cvxpy.expressions.constants.parameter import (is_param_affine,
-                                                   is_param_free,)
+from cvxpy.expressions.constants.parameter import (
+    is_param_affine,
+    is_param_free,
+)
+from cvxpy.expressions.expression import Expression
+from cvxpy.utilities import bounds as bounds_utils
+
+
+def _as_sparse_array(value):
+    if isinstance(value, sp.spmatrix):
+        return sp.coo_array(value)
+    return value
 
 
 class BinaryOperator(AffAtom):
@@ -51,11 +58,36 @@ class BinaryOperator(AffAtom):
 
     def name(self):
         pretty_args = []
-        for a in self.args:
+        for i, a in enumerate(self.args):
+            # Always parenthesize AddExpression and DivExpression
             if isinstance(a, (AddExpression, DivExpression)):
+                pretty_args.append('(' + a.name() + ')')
+            # For division, also parenthesize multiplication on the right
+            elif isinstance(self, DivExpression) and i == 1 and \
+                    isinstance(a, (MulExpression, multiply)):
                 pretty_args.append('(' + a.name() + ')')
             else:
                 pretty_args.append(a.name())
+        return pretty_args[0] + ' ' + self.OP_NAME + ' ' + pretty_args[1]
+
+    def format_labeled(self):
+        """Format binary operation with labels where available."""
+        # Check for own label first
+        if self._label is not None:
+            return self._label
+
+        # Build from sub-expressions using their labels
+        pretty_args = []
+        for i, a in enumerate(self.args):
+            # Always parenthesize AddExpression and DivExpression
+            if isinstance(a, (AddExpression, DivExpression)):
+                pretty_args.append('(' + a.format_labeled() + ')')
+            # For division, also parenthesize multiplication on the right
+            elif isinstance(self, DivExpression) and i == 1 and \
+                    isinstance(a, (MulExpression, multiply)):
+                pretty_args.append('(' + a.format_labeled() + ')')
+            else:
+                pretty_args.append(a.format_labeled())
         return pretty_args[0] + ' ' + self.OP_NAME + ' ' + pretty_args[1]
 
     def numeric(self, values):
@@ -63,7 +95,7 @@ class BinaryOperator(AffAtom):
         """
         return reduce(self.OP_FUNC, values)
 
-    def sign_from_args(self) -> Tuple[bool, bool]:
+    def sign_from_args(self) -> tuple[bool, bool]:
         """Default to rules for times.
         """
         return u.sign.mul_sign(self.args[0], self.args[1])
@@ -80,19 +112,45 @@ class BinaryOperator(AffAtom):
         return (self.args[0].is_complex() or self.args[1].is_complex()) and \
             not (self.args[0].is_imag() and self.args[1].is_imag())
 
+    def bounds_from_args(self) -> tuple[np.ndarray, np.ndarray]:
+        """Returns bounds for elementwise multiplication based on argument bounds."""
+        lb1, ub1 = self.args[0].get_bounds()
+        lb2, ub2 = self.args[1].get_bounds()
+        return bounds_utils.mul_bounds(lb1, ub1, lb2, ub2)
 
-def matmul(lh_exp, rh_exp) -> "MulExpression":
+
+def matmul(lh_exp, rh_exp) -> Expression:
     """Matrix multiplication."""
-    return MulExpression(lh_exp, rh_exp)
+    lh_exp = Expression.cast(lh_exp)
+    rh_exp = Expression.cast(rh_exp)
+    # mul_shapes below raises on a dimension mismatch too, but only after a
+    # 1-D operand has been promoted, so it reports the promoted (1, k) rather
+    # than the (k,) the caller passed. Check here to report the user's shapes.
+    if lh_exp.shape and rh_exp.shape:
+        rh_inner_dim = rh_exp.shape[-2] if rh_exp.ndim > 1 else rh_exp.shape[0]
+        if lh_exp.shape[-1] != rh_inner_dim:
+            raise ValueError(
+                f"Incompatible dimensions {lh_exp.shape} {rh_exp.shape}"
+            )
+
+    target_shape = u.shape.mul_shapes(lh_exp.shape, rh_exp.shape)
+    prod = MulExpression(lh_exp, rh_exp)
+    if prod.shape != target_shape:
+        # MulExpression retains axes inserted while promoting 1-D operands;
+        # the public wrapper removes them to match np.matmul's result shape.
+        return reshape(prod, target_shape, order='F')
+    return prod
 
 
 class MulExpression(BinaryOperator):
     """Matrix multiplication.
 
-    The semantics of multiplication are exactly as those of NumPy's
-    matmul function, except here multiplication by a scalar is permitted.
-    MulExpression objects can be created by using the '*' operator of
-    the Expression class.
+    This is the low-level multiplication atom. For batched multiplication with
+    a 1-D operand, direct construction retains the singleton axis inserted by
+    NumPy's promotion rules. Use :func:`matmul`, ``@``, or the deprecated ``*``
+    spelling for the public NumPy-compatible result shape.
+
+    Multiplication by a scalar is also permitted.
 
     Parameters
     ----------
@@ -105,16 +163,94 @@ class MulExpression(BinaryOperator):
     OP_NAME = "@"
     OP_FUNC = op.mul
 
+    def __init__(self, lh_exp, rh_exp) -> None:
+        # Broadcast batch dimensions for ND matmul
+        lh_exp, rh_exp = self._broadcast_batch_dims(lh_exp, rh_exp)
+        super(MulExpression, self).__init__(lh_exp, rh_exp)
+
+    @staticmethod
+    def _broadcast_batch_dims(lh_exp, rh_exp):
+        """
+        Broadcast batch dimensions for ND matrix multiplication.
+
+        For A @ B where A has shape (...a, m, k) and B has shape (...b, k, n),
+        broadcasts both to have batch shape broadcast(...a, ...b).
+
+        Following np.matmul semantics, a 1-D operand is promoted to 2-D by
+        prepending a 1 to its shape (lhs) or appending a 1 (rhs) before
+        broadcasting; it is never broadcast along batch dimensions itself.
+        """
+        lh_exp = Expression.cast(lh_exp)
+        rh_exp = Expression.cast(rh_exp)
+
+        # Only apply batch broadcasting for ND arrays (ndim > 2)
+        if lh_exp.ndim <= 2 and rh_exp.ndim <= 2:
+            return lh_exp, rh_exp
+
+        lh_1d = lh_exp.ndim == 1
+        rh_1d = rh_exp.ndim == 1
+
+        # Promote 1-D operands to 2-D per np.matmul semantics. Materializing a
+        # concrete Constant avoids unnecessary reshape and broadcast_to atoms;
+        # Parameters must remain symbolic so DPP re-solves still work.
+        if lh_1d:
+            target_shape = (1,) + lh_exp.shape
+            if lh_exp.is_constant() and not lh_exp.parameters():
+                value = np.reshape(lh_exp.value, target_shape, order='F')
+                lh_exp = Expression.cast(value)
+            else:
+                lh_exp = reshape(lh_exp, target_shape, order='F')
+        if rh_1d:
+            target_shape = rh_exp.shape + (1,)
+            if rh_exp.is_constant() and not rh_exp.parameters():
+                value = np.reshape(rh_exp.value, target_shape, order='F')
+                rh_exp = Expression.cast(value)
+            else:
+                rh_exp = reshape(rh_exp, target_shape, order='F')
+
+        lh_shape = lh_exp.shape
+        rh_shape = rh_exp.shape
+
+        # Extract batch dimensions (all but last 2)
+        lh_batch = lh_shape[:-2] if len(lh_shape) > 2 else ()
+        rh_batch = rh_shape[:-2] if len(rh_shape) > 2 else ()
+
+        # Compute broadcast batch shape
+        try:
+            broadcast_batch = np.broadcast_shapes(lh_batch, rh_batch)
+        except ValueError:
+            # Let shape validation handle the error with a clearer message
+            return lh_exp, rh_exp
+
+        # Broadcast lhs if needed
+        if lh_batch != broadcast_batch:
+            target_shape = broadcast_batch + lh_shape[-2:]
+            if lh_1d and lh_exp.is_constant() and not lh_exp.parameters():
+                value = np.broadcast_to(lh_exp.value, target_shape)
+                lh_exp = Expression.cast(value)
+            else:
+                lh_exp = broadcast_to(lh_exp, target_shape)
+
+        # Broadcast rhs if needed
+        if rh_batch != broadcast_batch:
+            target_shape = broadcast_batch + rh_shape[-2:]
+            if rh_1d and rh_exp.is_constant() and not rh_exp.parameters():
+                value = np.broadcast_to(rh_exp.value, target_shape)
+                rh_exp = Expression.cast(value)
+            else:
+                rh_exp = broadcast_to(rh_exp, target_shape)
+
+        return lh_exp, rh_exp
+
     def numeric(self, values):
         """Matrix multiplication.
         """
-        if self.args[0].shape == () or self.args[1].shape == () or \
-           intf.is_sparse(values[0]) or intf.is_sparse(values[1]):
-            return values[0] * values[1]
+        if values[0].shape == () or values[1].shape == ():
+            return _as_sparse_array(values[0] * values[1])
         else:
-            return np.matmul(values[0], values[1])
+            return _as_sparse_array(values[0] @ values[1])
 
-    def shape_from_args(self) -> Tuple[int, ...]:
+    def shape_from_args(self) -> tuple[int, ...]:
         """Returns the (row, col) shape of the expression.
         """
         return u.shape.mul_shapes(self.args[0].shape, self.args[1].shape)
@@ -157,6 +293,18 @@ class MulExpression(BinaryOperator):
         """
         return False
 
+    def bounds_from_args(self) -> tuple[np.ndarray, np.ndarray]:
+        """Returns bounds for matrix multiplication based on argument bounds."""
+        lb1, ub1 = self.args[0].get_bounds()
+        lb2, ub2 = self.args[1].get_bounds()
+
+        # For scalar multiplication, use elementwise bounds
+        if lb1.shape == () or lb2.shape == ():
+            return bounds_utils.mul_bounds(lb1, ub1, lb2, ub2)
+
+        # For matrix multiplication, use matmul bounds
+        return bounds_utils.matmul_bounds(lb1, ub1, lb2, ub2)
+
     def is_incr(self, idx) -> bool:
         """Is the composition non-decreasing in argument idx?
         """
@@ -171,6 +319,12 @@ class MulExpression(BinaryOperator):
         """Gives the (sub/super)gradient of the atom w.r.t. each argument.
 
         Matrix expressions are vectorized, so the gradient is a matrix.
+        CVXPY convention: grad[i, j] = d(output[j]) / d(input[i])
+        Uses Fortran (column-major) ordering for vectorization.
+
+        For matrix multiplication C = X @ Y:
+        - grad_X = kron(Y, I_m) where m = X.shape[0]
+        - grad_Y = kron(I_n, X).T where n = Y.shape[1] (or 1 for vectors)
 
         Args:
             values: A list of numeric values for the arguments.
@@ -181,29 +335,43 @@ class MulExpression(BinaryOperator):
         if self.args[0].is_constant() or self.args[1].is_constant():
             return super(MulExpression, self)._grad(values)
 
-        # TODO(akshayka): Verify that the following code is correct for
-        # non-affine arguments.
-        X = values[0]
-        Y = values[1]
+        X = np.atleast_2d(values[0])
+        Y = np.atleast_2d(values[1])
 
-        DX_rows = self.args[0].size
-        cols = self.args[0].size
+        # Handle 1D shapes: promote to 2D for consistent Kronecker computation
+        x_shape = self.args[0].shape
+        y_shape = self.args[1].shape
 
-        # DX = [diag(Y11), diag(Y12), ...]
-        #      [diag(Y21), diag(Y22), ...]
-        #      [   ...        ...     ...]
-        DX = sp.dok_matrix((DX_rows, cols))
-        for k in range(self.args[0].shape[0]):
-            DX[k::self.args[0].shape[0], k::self.args[0].shape[0]] = Y
-        DX = sp.csc_matrix(DX)
-        cols = 1 if len(self.args[1].shape) == 1 else self.args[1].shape[1]
-        DY = sp.block_diag([X.T for k in range(cols)], 'csc')
+        # dot product of two vectors with shape (n,)
+        if len(x_shape) == 1 and len(y_shape) == 1:
+            # For 1D @ 1D -> scalar: grad is simply the other vector
+            DX = sp.csc_array(values[1].reshape(-1, 1))
+            DY = sp.csc_array(values[0].reshape(-1, 1))
+            return [DX, DY]
+
+        # For matrix @ vector, Y is (k,) -> treat as (k, 1)
+        # Note: atleast_2d converts (k,) to (1, k), so we transpose to get (k, 1)
+        if len(y_shape) == 1:
+            Y = Y.T  # (1, k) from atleast_2d -> (k, 1)
+
+        # For vector @ matrix, X is (k,) -> treat as (1, k)
+        if len(x_shape) == 1:
+            X = X  # already (1, k) from atleast_2d
+
+        m = X.shape[0]  # rows of X
+        n = Y.shape[1]  # cols of Y
+
+        # grad_X = kron(Y, I_m) with shape (m*k, m*n)
+        DX = sp.kron(Y, sp.eye_array(m), format='csc')
+
+        # grad_Y = kron(I_n, X).T with shape (k*n, m*n)
+        DY = sp.kron(sp.eye_array(n), X, format='csc').T
 
         return [DX, DY]
 
     def graph_implementation(
-        self, arg_objs, shape: Tuple[int, ...], data=None
-    ) -> Tuple[lo.LinOp, List[Constraint]]:
+        self, arg_objs, shape: tuple[int, ...], data=None
+    ) -> tuple[lo.LinOp, list[Constraint]]:
         """Multiply the linear expressions.
 
         Parameters
@@ -233,22 +401,31 @@ class MulExpression(BinaryOperator):
 
 
 class multiply(MulExpression):
-    """ Multiplies two expressions elementwise.
-    """
+    """Multiplies two expressions elementwise."""
+
+    OP_NAME = "*"
 
     def __init__(self, lh_expr, rh_expr) -> None:
         lh_expr, rh_expr = self.broadcast(lh_expr, rh_expr)
         super(multiply, self).__init__(lh_expr, rh_expr)
 
     def is_atom_log_log_convex(self) -> bool:
-        """Is the atom log-log convex?
-        """
+        """Is the atom log-log convex?"""
         return True
 
     def is_atom_log_log_concave(self) -> bool:
-        """Is the atom log-log concave?
-        """
+        """Is the atom log-log concave?"""
         return True
+
+    def bounds_from_args(self) -> tuple[np.ndarray, np.ndarray]:
+        """Returns bounds for elementwise multiplication based on argument bounds.
+
+        Overrides MulExpression to use elementwise multiplication bounds
+        instead of matrix multiplication bounds.
+        """
+        lb1, ub1 = self.args[0].get_bounds()
+        lb2, ub2 = self.args[1].get_bounds()
+        return bounds_utils.mul_bounds(lb1, ub1, lb2, ub2)
 
     def is_atom_quasiconvex(self) -> bool:
         return (
@@ -263,19 +440,29 @@ class multiply(MulExpression):
             arg.is_nonpos() for arg in self.args)
 
     def numeric(self, values):
-        """Multiplies the values elementwise.
-        """
+        """Multiplies the values elementwise."""
         if sp.issparse(values[0]):
-            return values[0].multiply(values[1])
+            return _as_sparse_array(values[0].multiply(values[1]))
         elif sp.issparse(values[1]):
-            return values[1].multiply(values[0])
+            return _as_sparse_array(values[1].multiply(values[0]))
         else:
             return np.multiply(values[0], values[1])
 
-    def shape_from_args(self) -> Tuple[int, ...]:
-        """The sum of the argument dimensions - 1.
-        """
-        return u.shape.sum_shapes([arg.shape for arg in self.args])
+    def validate_arguments(self):
+        """Validate that the arguments are broadcastable."""
+        np.broadcast(
+            np.empty(self.args[0].shape, dtype=np.dtype([])),
+            np.empty(self.args[1].shape, dtype=np.dtype([]))
+        )
+
+    def shape_from_args(self) -> tuple[int, ...]:
+        """Call np.broadcast on multiply arguments."""
+        return np.broadcast_shapes(self.args[0].shape, self.args[1].shape)
+
+    def is_symmetric(self) -> bool:
+        """Is the expression symmetric?"""
+        return self.shape[0] == self.shape[1] and \
+               all(arg.is_symmetric() for arg in self.args)
 
     def is_psd(self) -> bool:
         """Is the expression a positive semidefinite matrix?
@@ -289,9 +476,43 @@ class multiply(MulExpression):
         return (self.args[0].is_psd() and self.args[1].is_nsd()) or \
                (self.args[0].is_nsd() and self.args[1].is_psd())
 
+    def is_hermitian(self) -> bool:
+        """Is the expression Hermitian?
+        """
+        return (self.args[0].is_hermitian() and self.args[1].is_hermitian())
+
+    def _grad(self, values):
+        """Gives the (sub/super)gradient of elementwise multiply.
+
+        For z = multiply(x, y), we have z[i] = x[i] * y[i].
+        Gradient is diagonal: grad_x = diag(y), grad_y = diag(x).
+        CVXPY convention: grad[i, j] = d(output[j]) / d(input[i])
+
+        Args:
+            values: A list of numeric values for the arguments.
+
+        Returns:
+            A list of SciPy CSC sparse matrices or None.
+        """
+        if self.args[0].is_constant() or self.args[1].is_constant():
+            return super(multiply, self)._grad(values)
+
+        X = values[0]
+        Y = values[1]
+
+        # Flatten in F-order for CVXPY convention
+        x_flat = np.asarray(X).flatten(order='F')
+        y_flat = np.asarray(Y).flatten(order='F')
+
+        # Gradient is diagonal: grad_x[i, i] = y[i], grad_y[i, i] = x[i]
+        DX = sp.diags_array(y_flat, format='csc')
+        DY = sp.diags_array(x_flat, format='csc')
+
+        return [DX, DY]
+
     def graph_implementation(
-        self, arg_objs, shape: Tuple[int, ...], data=None
-    ) -> Tuple[lo.LinOp, List[Constraint]]:
+        self, arg_objs, shape: tuple[int, ...], data=None
+    ) -> tuple[lo.LinOp, list[Constraint]]:
         """Multiply the expressions elementwise.
 
         Parameters
@@ -338,16 +559,20 @@ class DivExpression(BinaryOperator):
         """
         for i in range(2):
             if sp.issparse(values[i]):
-                values[i] = values[i].todense().A
+                values[i] = values[i].toarray()
         return np.divide(values[0], values[1])
 
     def is_quadratic(self) -> bool:
         return self.args[0].is_quadratic() and self.args[1].is_constant()
 
+    def has_quadratic_term(self) -> bool:
+        """Can be a quadratic term if divisor is constant."""
+        return self.args[0].has_quadratic_term() and self.args[1].is_constant()
+
     def is_qpwa(self) -> bool:
         return self.args[0].is_qpwa() and self.args[1].is_constant()
 
-    def shape_from_args(self) -> Tuple[int, ...]:
+    def shape_from_args(self) -> tuple[int, ...]:
         """Returns the (row, col) shape of the expression.
         """
         return self.args[0].shape
@@ -377,6 +602,12 @@ class DivExpression(BinaryOperator):
     def is_atom_quasiconcave(self) -> bool:
         return self.is_atom_quasiconvex()
 
+    def bounds_from_args(self) -> tuple[np.ndarray, np.ndarray]:
+        """Returns bounds for division based on argument bounds."""
+        lb1, ub1 = self.args[0].get_bounds()
+        lb2, ub2 = self.args[1].get_bounds()
+        return bounds_utils.div_bounds(lb1, ub1, lb2, ub2)
+
     def is_incr(self, idx) -> bool:
         """Is the composition non-decreasing in argument idx?
         """
@@ -394,8 +625,8 @@ class DivExpression(BinaryOperator):
             return self.args[0].is_nonneg()
 
     def graph_implementation(
-        self, arg_objs, shape: Tuple[int, ...], data=None
-    ) -> Tuple[lo.LinOp, List[Constraint]]:
+        self, arg_objs, shape: tuple[int, ...], data=None
+    ) -> tuple[lo.LinOp, list[Constraint]]:
         """Multiply the linear expressions.
 
         Parameters
@@ -415,7 +646,7 @@ class DivExpression(BinaryOperator):
         return (lu.div_expr(arg_objs[0], arg_objs[1]), [])
 
 
-def scalar_product(x, y):
+def vdot(x, y) -> Expression:
     """
     Return the standard inner product (or "scalar product") of (x,y).
 
@@ -445,3 +676,40 @@ def scalar_product(x, y):
     y = deep_flatten(y)
     prod = multiply(conj(x), y)
     return cvxpy_sum(prod)
+
+
+def scalar_product(x, y) -> Expression:
+    """
+    Alias for vdot.
+    """
+    return vdot(x, y)
+
+
+def outer(x, y) -> Expression:
+    """
+    Return the outer product of (x,y).
+
+    Parameters
+    ----------
+    x : Expression, int, float, NumPy ndarray, or nested list thereof.
+        Input is flattened if not already a vector.
+        The linear argument to the outer product.
+    y : Expression, int, float, NumPy ndarray, or nested list thereof.
+        Input is flattened if not already a vector.
+        The transposed-linear argument to the outer product.
+
+    Returns
+    -------
+    expr : Expression
+        The outer product of (x,y), linear in x and transposed-linear in y.
+    """
+    x = Expression.cast(x)
+    if x.ndim > 1:
+        raise ValueError("x must be a 1-d array.")
+    y = Expression.cast(y)
+    if y.ndim > 1:
+        raise ValueError("y must be a 1-d array.")
+
+    x = reshape(x, (x.size, 1), order='F')
+    y = reshape(y, (1, y.size), order='F')
+    return x @ y

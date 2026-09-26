@@ -13,19 +13,24 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-from cvxpy.atoms.elementwise.inv_pos import inv_pos
+import numpy as np
+
 from cvxpy.atoms.elementwise.power import power
 from cvxpy.atoms.geo_mean import geo_mean
+from cvxpy.expressions.expression import Expression
 
 
-def inv_prod(value):
+def inv_prod(value, approx=True) -> Expression:
     """The reciprocal of a product of the entries of a vector ``x``.
 
     Parameters
     ----------
-    x : Expression or numeric
+    value : Expression or numeric
         The expression whose reciprocal product is to be computed. Must have
         positive entries.
+    approx : bool
+        When True (default), uses SOC approximation. When False,
+        uses power cone (exact).
 
     Returns
     -------
@@ -35,4 +40,5 @@ def inv_prod(value):
 
         where :math:`n` is the length of :math:`x`.
     """
-    return power(inv_pos(geo_mean(value)), sum(value.shape))
+    return power(geo_mean(value, approx=approx), -int(np.prod(value.shape)),
+                 approx=approx)

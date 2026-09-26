@@ -1,12 +1,13 @@
 import warnings
 
 import numpy as np
+import pytest
 
 import cvxpy as cp
 import cvxpy.error as error
 from cvxpy.tests.base_test import BaseTest
 
-SOLVER = cp.ECOS
+SOLVER = cp.CLARABEL
 
 
 class TestDcp(BaseTest):
@@ -162,21 +163,6 @@ class TestDcp(BaseTest):
         self.assertFalse(cp.reductions.eval_params.EvalParams
                          in [type(r) for r in chain.reductions])
 
-    def test_param_quad_form_not_dpp(self) -> None:
-        x = cp.Variable((2, 1))
-        P = cp.Parameter((2, 2), PSD=True)
-        P.value = np.eye(2)
-        y = cp.quad_form(x, P)
-        self.assertFalse(y.is_dpp())
-        self.assertTrue(y.is_dcp())
-
-    def test_const_quad_form_is_dpp(self) -> None:
-        x = cp.Variable((2, 1))
-        P = np.eye(2)
-        y = cp.quad_form(x, P)
-        self.assertTrue(y.is_dpp())
-        self.assertTrue(y.is_dcp())
-
     def test_paper_example_logreg_is_dpp(self) -> None:
         N, n = 3, 2
         beta = cp.Variable((n, 1))
@@ -258,7 +244,7 @@ class TestDcp(BaseTest):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             prob.solve(solver=cp.SCS, eps=1e-6)
-        np.testing.assert_almost_equal(prob.value, 2.)
+        np.testing.assert_almost_equal(prob.value, 2., decimal=3)
 
         s = cp.Parameter(1, nonneg=True)
         x = cp.Variable(1)
@@ -269,7 +255,7 @@ class TestDcp(BaseTest):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             prob.solve(solver=cp.SCS, eps=1e-6)
-        np.testing.assert_almost_equal(prob.value, 2.)
+        np.testing.assert_almost_equal(prob.value, 2., decimal=3)
 
         s = cp.Parameter(1, nonneg=True)
         x = cp.Variable(1)
@@ -280,7 +266,172 @@ class TestDcp(BaseTest):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             prob.solve(solver=cp.SCS, eps=1e-6)
-        np.testing.assert_almost_equal(prob.value, 1.)
+        np.testing.assert_almost_equal(prob.value, 1., decimal=3)
+
+    def test_ignore_dpp(self) -> None:
+        """Test the ignore_dpp flag.
+        """
+        x = cp.Parameter()
+        x.value = 5
+        y = cp.Variable()
+        problem = cp.Problem(cp.Minimize(x + y), [x == y])
+        self.assertTrue(problem.is_dpp())
+        self.assertTrue(problem.is_dcp())
+        # Basic solve functionality.
+        result = problem.solve(cp.SCS, ignore_dpp=True)
+        self.assertAlmostEqual(result, 10)
+
+        # enforce_dpp clashes with ignore_dpp
+        with pytest.raises(error.DPPError):
+            problem.solve(cp.SCS, enforce_dpp=True, ignore_dpp=True)
+
+    def test_quad_over_lin(self) -> None:
+        """Test case with parameter in quad_over_lin."""
+        # Bug where the second argument to quad_over_lin
+        # was a parameter and the problem was solved
+        # as a cone program with a quadratic objective:
+        # https://github.com/cvxpy/cvxpy/issues/2433
+        x = cp.Variable()
+        p = cp.Parameter()
+
+        loss = cp.quad_over_lin(x,p) + x
+        prob = cp.Problem(
+            cp.Minimize(loss),
+        )
+
+        with warnings.catch_warnings():
+            # TODO(akshayka): Try to emit DPP problems in Dqcp2Dcp
+            warnings.filterwarnings('ignore', message=r'.*DPP.*')
+            p.value = 1
+            prob.solve(solver=cp.CLARABEL)
+            sol1 = x.value.copy()
+            p.value = 1000
+            prob.solve(solver=cp.CLARABEL)
+            sol2 = x.value.copy()
+            p.value = 1
+            prob.solve(solver=cp.CLARABEL)
+            sol3 = x.value.copy()
+            assert not np.isclose(sol1, sol2)
+            assert np.isclose(sol1, sol3)
+
+        # Cannot solve as a QP with DPP.
+        with pytest.raises(error.DPPError):
+            prob.solve(cp.OSQP, enforce_dpp=True)
+
+        # works for DPP + DGP
+        x = cp.Variable(2, pos = True)
+        y = cp.Parameter(pos = True, value = 1)
+        constraints = [x >= 1]
+
+        objective = cp.quad_over_lin(x,y)
+
+        prob = cp.Problem(cp.Minimize(objective), constraints)
+        sol1 = prob.solve(gp=True)
+        y.value = 2
+        sol2 = prob.solve(gp=True)
+        y.value = 1
+        sol3 = prob.solve(gp=True)
+        assert np.isclose(sol1, 2)
+        assert np.isclose(sol2, 1)
+        assert np.isclose(sol3, 2)
+
+    def test_log_det_with_parameter(self) -> None:
+        """Test log_det with parameter matrix routes to conic solver.
+
+        This tests the fix for the bug where log_det(P) with P a parameter
+        was incorrectly routed to QP solvers. The problem appeared as a QP
+        outside DPP scope (log_det(P) is constant), but canonicalization
+        preserves parameters and creates ExpCone + PSD constraints that
+        QP solvers cannot handle.
+        """
+        n = 2
+        x = cp.Variable(n, nonneg=True)
+        y = cp.Variable(n, nonneg=True)
+        P = cp.Parameter((n, n))
+        P.value = np.eye(n)
+
+        objective = cp.sum_squares(x + y) - 2 * cp.log_det(P)
+        problem = cp.Problem(cp.Minimize(objective))
+
+        # Problem should be DPP compliant
+        self.assertTrue(problem.is_dpp())
+        self.assertTrue(problem.is_dcp())
+
+        # With DPP (default), should route to conic solver and solve correctly
+        problem.solve(solver=cp.SCS)
+        self.assertEqual(problem.status, cp.OPTIMAL)
+        self.assertAlmostEqual(problem.value, 0.0, places=4)
+        np.testing.assert_array_almost_equal(x.value, np.zeros(n), decimal=4)
+        np.testing.assert_array_almost_equal(y.value, np.zeros(n), decimal=4)
+
+        # Verify it uses conic solver (SCS), not QP solver
+        _, chain, _ = problem.get_problem_data(cp.SCS)
+        solver_name = chain.reductions[-1].name()
+        self.assertEqual(solver_name, cp.SCS)
+
+    def test_log_det_with_parameter_ignore_dpp(self) -> None:
+        """Test log_det with parameter works with ignore_dpp=True.
+
+        With ignore_dpp=True, EvalParams runs first and evaluates log_det(P)
+        to a constant, so the problem becomes a true QP that OSQP can handle.
+        """
+        n = 2
+        x = cp.Variable(n, nonneg=True)
+        y = cp.Variable(n, nonneg=True)
+        P = cp.Parameter((n, n))
+        P.value = np.eye(n)
+
+        objective = cp.sum_squares(x + y) - 2 * cp.log_det(P)
+        problem = cp.Problem(cp.Minimize(objective))
+
+        # With ignore_dpp=True, should route to QP solver (EvalParams runs first)
+        problem.solve(solver=cp.OSQP, ignore_dpp=True)
+        self.assertEqual(problem.status, cp.OPTIMAL)
+        self.assertAlmostEqual(problem.value, 0.0, places=4)
+        np.testing.assert_array_almost_equal(x.value, np.zeros(n), decimal=4)
+        np.testing.assert_array_almost_equal(y.value, np.zeros(n), decimal=4)
+
+        # Verify EvalParams is in the chain
+        _, chain, _ = problem.get_problem_data(cp.OSQP, ignore_dpp=True)
+        reduction_types = [type(r).__name__ for r in chain.reductions]
+        self.assertIn('EvalParams', reduction_types)
+
+    def test_cumsum_of_parameter(self) -> None:
+        """cumsum of a parameter-only expression must stay parameter-affine.
+
+        Regression test: cumsum_canon replaced cumsum(p) with an auxiliary
+        Variable, so cumsum(p) @ x became Variable @ Variable and DPP
+        canonicalization failed with a bare AssertionError.
+        """
+        p = cp.Parameter(3)
+        p.value = np.array([1.0, 2.0, 3.0])
+        x = cp.Variable(3)
+        problem = cp.Problem(cp.Minimize(cp.cumsum(p) @ x + cp.sum_squares(x)))
+        self.assertTrue(problem.is_dpp())
+        problem.solve(solver=cp.CLARABEL)
+        # Analytic optimum: -||cumsum(p)||^2 / 4 = -(1 + 9 + 36) / 4.
+        self.assertAlmostEqual(problem.value, -11.5)
+
+        # Constraint position: min ||x||^2 s.t. x >= cumsum(p).
+        constr_prob = cp.Problem(cp.Minimize(cp.sum_squares(x)), [x >= cp.cumsum(p)])
+        constr_prob.solve(solver=cp.CLARABEL)
+        self.assertItemsAlmostEqual(x.value, np.cumsum(p.value))
+
+        # Re-solving with a new parameter value uses the DPP cache correctly.
+        p.value = np.array([2.0, -1.0, 1.0])
+        problem.solve(solver=cp.CLARABEL)
+        self.assertAlmostEqual(problem.value, -np.sum(np.cumsum(p.value) ** 2) / 4)
+
+    def test_cumsum_of_parameter_axes(self) -> None:
+        """cumsum of a 2-D parameter along each axis matches np.cumsum."""
+        P = cp.Parameter((2, 3))
+        P.value = np.arange(6.0).reshape(2, 3)
+        for axis in [0, 1, None]:
+            y = cp.Variable(np.cumsum(P.value, axis=axis).shape)
+            problem = cp.Problem(cp.Minimize(0), [y == cp.cumsum(P, axis=axis)])
+            self.assertTrue(problem.is_dpp())
+            problem.solve(solver=cp.CLARABEL)
+            self.assertItemsAlmostEqual(y.value, np.cumsum(P.value, axis=axis))
 
 
 class TestDgp(BaseTest):
@@ -725,12 +876,12 @@ class TestDgp(BaseTest):
                               cp.sum(alpha + w) <= 10])
         problem.solve(SOLVER, gp=True, enforce_dpp=True)
         self.assertAlmostEqual(problem.value, 10)
-        np.testing.assert_almost_equal(h.value, np.array([5, 5]))
-        np.testing.assert_almost_equal(w.value, np.array([4, 4]))
+        np.testing.assert_almost_equal(h.value, np.array([5, 5]), decimal=3)
+        np.testing.assert_almost_equal(w.value, np.array([4, 4]), decimal=3)
 
         alpha.value = [4.0, 4.0]
-        problem.solve(SOLVER, gp=True, enforce_dpp=True)
-        self.assertAlmostEqual(problem.value, 40)
+        problem.solve(cp.CLARABEL, gp=True, enforce_dpp=True)
+        self.assertAlmostEqual(problem.value, 40, places=3)
         np.testing.assert_almost_equal(h.value, np.array([20, 20]), decimal=3)
         np.testing.assert_almost_equal(w.value, np.array([1, 1]), decimal=3)
 
@@ -742,8 +893,8 @@ class TestDgp(BaseTest):
                              [cp.multiply(w, h) >= 20,
                               cp.sum(alpha + w) <= 10])
         problem.solve(SOLVER, gp=True, enforce_dpp=True)
-        np.testing.assert_almost_equal(w.value, np.array([4, 4]))
-        np.testing.assert_almost_equal(h.value, np.array([5, 5]))
+        np.testing.assert_almost_equal(w.value, np.array([4, 4]), decimal=3)
+        np.testing.assert_almost_equal(h.value, np.array([5, 5]), decimal=3)
         self.assertAlmostEqual(problem.value, 6**2 + 6**2)
 
         alpha.value = [4.0, 4.0]
@@ -760,29 +911,29 @@ class TestDgp(BaseTest):
                              [cp.multiply(w, h) >= 10,
                               cp.sum(w) <= 20])
         problem.solve(SOLVER, gp=True, enforce_dpp=True)
-        np.testing.assert_almost_equal(problem.value, 8)
-        np.testing.assert_almost_equal(h.value, np.array([[2, 2], [2, 2]]))
-        np.testing.assert_almost_equal(w.value, np.array([[5, 5], [5, 5]]))
+        np.testing.assert_almost_equal(problem.value, 8, decimal=4)
+        np.testing.assert_almost_equal(h.value, np.array([[2, 2], [2, 2]]), decimal=4)
+        np.testing.assert_almost_equal(w.value, np.array([[5, 5], [5, 5]]), decimal=4)
 
         alpha.value = 2.0
         problem.solve(SOLVER, gp=True, enforce_dpp=True)
-        np.testing.assert_almost_equal(problem.value, 16)
+        np.testing.assert_almost_equal(problem.value, 16, decimal=4)
 
         w = cp.Variable((2, 2), pos=True)
         h = cp.Parameter((2, 2), pos=True)
         h.value = np.ones((2, 2))
-        alpha = cp.Parameter(pos=True, value=1.0)
-        problem = cp.Problem(cp.Minimize(cp.sum(h)), [w == h])
+        alpha.value = 1.0
+        problem = cp.Problem(cp.Minimize(cp.sum(alpha * h)), [w == h])
         problem.solve(SOLVER, gp=True, enforce_dpp=True)
-        np.testing.assert_almost_equal(problem.value, 4.0)
+        np.testing.assert_almost_equal(problem.value, 4.0, decimal=4)
 
         h.value = 2.0 * np.ones((2, 2))
         problem.solve(SOLVER, gp=True, enforce_dpp=True)
-        np.testing.assert_almost_equal(problem.value, 8.0)
+        np.testing.assert_almost_equal(problem.value, 8.0, decimal=4)
 
         h.value = 3.0 * np.ones((2, 2))
         problem.solve(SOLVER, gp=True, enforce_dpp=True)
-        np.testing.assert_almost_equal(problem.value, 12.0)
+        np.testing.assert_almost_equal(problem.value, 12.0, decimal=4)
 
     def test_exp(self) -> None:
         x = cp.Variable(4, pos=True)
@@ -818,3 +969,81 @@ class TestDgp(BaseTest):
         expr = cp.gmatmul(A, x_par)
         self.assertFalse(expr.is_dgp(dpp=True))
         self.assertTrue(expr.is_dgp(dpp=False))
+
+
+class TestCallbackParam(BaseTest):
+    x = cp.Variable()
+    p = cp.Parameter()
+    q = cp.Parameter()
+
+    def test_callback_param(self) -> None:
+        callback_param = cp.CallbackParam(callback=lambda: self.p.value * self.q.value)
+        problem = cp.Problem(cp.Minimize(self.x), [self.x >= callback_param])
+        assert problem.is_dpp()
+        self.p.value = 1.0
+        self.q.value = 4.0
+        problem.solve()
+        self.assertAlmostEqual(self.x.value, 4.0)
+
+        self.p.value = 2.0
+        problem.solve()
+        self.assertAlmostEqual(self.x.value, 8.0)
+
+        with pytest.raises(NotImplementedError, match="Cannot set the value of a CallbackParam"):
+            callback_param.value = 1.0
+
+
+class TestComposedParametricRefresh(BaseTest):
+    """Re-solves must produce fresh problem data when a *composed* parameter
+    expression scales a coefficient matrix.
+
+    Expressions like ``(p * A) @ x`` or ``quad_form(x, g * Sigma)`` reach the
+    canonicalization backend as a parameter expression scaling a constant, and
+    ``quad_over_lin(x, p)`` canonicalizes to a quadratic matrix ``I/p`` derived
+    from the parameter. Whatever a backend caches across solves, reassigning
+    the parameter must be reflected in the next solution.
+
+    The formulations deliberately make the *optimal point* depend on the
+    parameter: the reported objective is recomputed from the live expression
+    at unpack time, so a parameter-invariant argmin would mask stale problem
+    data. Each shape is exercised on the default path and with
+    ``ignore_dpp=True``.
+    """
+
+    def _sweep(self, prob, param, values, check):
+        for kwargs in ({}, {"ignore_dpp": True}):
+            for val in values:
+                param.value = val
+                prob.solve(solver=SOLVER, **kwargs)
+                check(val)
+
+    def test_scaled_matrix_coefficient_refreshes(self) -> None:
+        A = np.array([[1.0, 2.0], [3.0, 4.0]])
+        x = cp.Variable(2)
+        p = cp.Parameter(nonneg=True)
+        prob = cp.Problem(cp.Minimize(cp.sum(x)), [(p * A) @ x >= 1, x >= 0])
+        self._sweep(
+            prob, p, (1.0, 100.0, 1.0),
+            lambda val: self.assertAlmostEqual(prob.value, 0.5 / val, places=4))
+
+    def test_scaled_quad_matrix_refreshes(self) -> None:
+        Sigma = np.array([[2.0, 0.0], [0.0, 3.0]])
+        x = cp.Variable(2)
+        g = cp.Parameter(nonneg=True)
+        prob = cp.Problem(cp.Minimize(
+            cp.quad_form(x, g * Sigma, assume_PSD=True) - 2.0 * cp.sum(x)))
+
+        def check(val):
+            self.assertAlmostEqual(prob.value, -5.0 / (6.0 * val), places=4)
+            self.assertItemsAlmostEqual(
+                x.value, [1.0 / (2 * val), 1.0 / (3 * val)], places=4)
+
+        self._sweep(prob, g, (1.0, 50.0, 1.0), check)
+
+    def test_derived_quad_matrix_refreshes(self) -> None:
+        x = cp.Variable()
+        p = cp.Parameter()
+        prob = cp.Problem(cp.Minimize(cp.quad_over_lin(x, p) + x))
+        self._sweep(
+            prob, p, (1.0, 1000.0, 1.0),
+            lambda val: self.assertAlmostEqual(x.value, -val / 2.0, places=3))

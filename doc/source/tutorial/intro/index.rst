@@ -50,6 +50,7 @@ achieve the optimal objective.
 ``prob.value``, and the ``value`` field of all the variables in the
 problem.
 
+
 Changing the problem
 --------------------
 
@@ -168,7 +169,7 @@ vectors, or matrices, meaning they are 0, 1, or 2 dimensional.
     # Vector variable with shape (5,).
     x = cp.Variable(5)
 
-    # Matrix variable with shape (5, 1).
+    # Column vector variable with shape (5, 1).
     x = cp.Variable((5, 1))
 
     # Matrix variable with shape (4, 7).
@@ -182,7 +183,6 @@ sparse matrices, etc. ``A`` and ``b`` could even be different types.
 Currently the following types may be used as constants:
 
 -  NumPy ndarrays
--  NumPy matrices
 -  SciPy sparse matrices
 
 Here's an example of a CVXPY problem with vectors and matrices:
@@ -190,16 +190,15 @@ Here's an example of a CVXPY problem with vectors and matrices:
 .. code:: python
 
     # Solves a bounded least-squares problem.
-
     import cvxpy as cp
-    import numpy
+    import numpy as np
 
     # Problem data.
     m = 10
     n = 5
     numpy.random.seed(1)
-    A = numpy.random.randn(m, n)
-    b = numpy.random.randn(m)
+    A = np.random.randn(m, n)
+    b = np.random.randn(m)
 
     # Construct the problem.
     x = cp.Variable(n)
@@ -207,16 +206,16 @@ Here's an example of a CVXPY problem with vectors and matrices:
     constraints = [0 <= x, x <= 1]
     prob = cp.Problem(objective, constraints)
 
-    print("Optimal value", prob.solve())
-    print("Optimal var")
+    print("Optimal objective value", prob.solve())
+    print("Optimal variable value")
     print(x.value) # A numpy ndarray.
 
 ::
 
-    Optimal value 4.14133859146
-    Optimal var
+    Optimal objective value 4.14133859146
+    Optimal variable value
     [ -5.11480673e-21   6.30625742e-21   1.34643668e-01   1.24976681e-01
-  -4.79039542e-21]
+    -4.79039542e-21]
 
 Constraints
 -----------
@@ -237,8 +236,7 @@ cases, solving a parametrized program multiple times can be
 substantially faster than repeatedly solving a new problem: after reading
 this section, be sure to read the tutorial on :ref:`dpp` (DPP).
 
-Parameters can be vectors or matrices, just like variables. When you
-create a parameter you have the option of specifying attributes such as the
+When you create a parameter you have the option of specifying attributes such as the
 sign of the parameter's entries, whether the parameter is symmetric, etc.
 These attributes are used in :ref:`dcp` and are unknown unless specified.
 Parameters can be assigned a constant value any time after they are created.
@@ -257,7 +255,7 @@ as those specified when the parameter was created.
     G = cp.Parameter((4, 7), nonpos=True)
 
     # Assigns a constant value to G.
-    G.value = -numpy.ones((4, 7))
+    G.value = -np.ones((4, 7))
 
 You can initialize a parameter with a value. The following code segments are equivalent:
 
@@ -276,15 +274,15 @@ computes a trade-off curve for a LASSO problem.
 .. code:: python
 
     import cvxpy as cp
-    import numpy
+    import numpy as np
     import matplotlib.pyplot as plt
 
     # Problem data.
     n = 15
     m = 10
-    numpy.random.seed(1)
-    A = numpy.random.randn(n, m)
-    b = numpy.random.randn(n)
+    np.random.seed(1)
+    A = np.random.randn(n, m)
+    b = np.random.randn(n)
     # gamma must be nonnegative due to DCP rules.
     gamma = cp.Parameter(nonneg=True)
 
@@ -298,7 +296,7 @@ computes a trade-off curve for a LASSO problem.
     sq_penalty = []
     l1_penalty = []
     x_values = []
-    gamma_vals = numpy.logspace(-4, 6)
+    gamma_vals = np.logspace(-4, 6)
     for val in gamma_vals:
         gamma.value = val
         prob.solve()
@@ -352,3 +350,80 @@ problem above.
     # Parallel computation (set to 1 process here).
     pool = Pool(processes = 1)
     x_values = pool.map(get_x, gamma_vals)
+
+.. _labels:
+
+Custom Labels
+-------------
+
+You can assign custom labels to expressions and constraints to make 
+debugging and model interpretation easier. Labels appear when printing 
+constraints and can be used with the ``format_labeled()`` method to 
+show labeled expressions in problems.
+
+Labels can be assigned using the ``set_label()`` method or the ``label`` property:
+
+.. code:: python
+
+    import cvxpy as cp
+    import numpy as np
+    
+    # Create variables
+    weights = cp.Variable(3, name="weights")
+    
+    # Create constraints with custom labels
+    constraints = [
+        (weights >= 0).set_label("non_negative_weights"),
+        (cp.sum(weights) == 1).set_label("budget_constraint"),
+        (weights <= 0.4).set_label("concentration_limits")
+    ]
+    
+    # Create expressions with custom labels (portfolio example)
+    # Expected returns and covariance (toy data for illustration)
+    mu = np.array([0.08, 0.10, 0.07])
+    Sigma = np.array([[0.10, 0.02, 0.01],
+                      [0.02, 0.08, 0.03],
+                      [0.01, 0.03, 0.09]])
+
+    expected_return = (mu @ weights).set_label("expected_return")
+    risk = cp.quad_form(weights, Sigma).set_label("risk")
+
+    # Build objective (risk-return tradeoff)
+    objective = cp.Minimize(risk - 0.5 * expected_return)
+    
+    # Create and display the problem
+    problem = cp.Problem(objective, constraints)
+    
+    # Use format_labeled() to see labels in the objective
+    print(problem.format_labeled())
+
+::
+
+    minimize risk + -0.5 @ expected_return
+    subject to non_negative_weights: 0.0 <= weights
+               budget_constraint: Sum(weights, None, False) == 1.0
+               concentration_limits: weights <= 0.4
+
+The ``set_label()`` method returns the object itself, allowing method chaining.
+Labels are "live" and can be modified after problem creation:
+
+.. code:: python
+
+    # Change labels dynamically
+    risk.label = "portfolio_risk"  # Change label
+    print(problem.format_labeled())
+
+::
+
+    minimize portfolio_risk + -0.5 @ expected_return
+    subject to non_negative_weights: 0.0 <= weights
+               budget_constraint: Sum(weights, None, False) == 1.0
+               concentration_limits: weights <= 0.4
+
+For more details on the label feature, including advanced usage and limitations, 
+see the full labels documentation.
+
+Next steps
+----------
+
+For more features and examples, explore the rest of the CVXPY documentation.

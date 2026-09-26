@@ -15,18 +15,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 import time
-from distutils.version import StrictVersion
 
 import cvxpy.settings as s
 from cvxpy.reductions.solution import Solution, failure_solution
 from cvxpy.reductions.solvers import utilities
 from cvxpy.reductions.solvers.conic_solvers import scs_conif
 from cvxpy.reductions.solvers.conic_solvers.conic_solver import ConicSolver
+from cvxpy.utilities.citations import CITATION_DICT
+from cvxpy.utilities.versioning import Version
 
 
 class DIFFCP(scs_conif.SCS):
     """An interface for the DIFFCP solver, a differentiable wrapper of SCS and ECOS.
     """
+    REQUIRED_MODULES = ("diffcp",)
+
     # Map of DIFFCP status to CVXPY status.
     STATUS_MAP = {"Solved": s.OPTIMAL,
                   "Solved/Inaccurate": s.OPTIMAL_INACCURATE,
@@ -47,9 +50,18 @@ class DIFFCP(scs_conif.SCS):
         """Imports the solver.
         """
         import diffcp
+        major_version = int(diffcp.__version__.split(".")[0])
+        minor_version = int(diffcp.__version__.split(".")[1])
         patch_version = int(diffcp.__version__.split(".")[2])
-        if patch_version < 15:
+        if major_version <= 1 \
+                and minor_version == 0 \
+                and patch_version < 15:
             raise ImportError("diffcp >= 1.0.15 is required")
+
+    def supports_quad_obj(self) -> bool:
+        """Does not support a quadratic objective.
+        """
+        return False
 
     def apply(self, problem):
         problem, data, inv_data = self._prepare_data_and_inv_data(problem)
@@ -71,7 +83,7 @@ class DIFFCP(scs_conif.SCS):
         attr = {}
         if solution["solve_method"] == s.SCS:
             import scs
-            if StrictVersion(scs.__version__) < StrictVersion('3.0.0'):
+            if Version(scs.__version__) < Version('3.0.0'):
                 status = scs_conif.SCS.STATUS_MAP[solution["info"]["statusVal"]]
                 attr[s.SOLVE_TIME] = solution["info"]["solveTime"]
                 attr[s.SETUP_TIME] = solution["info"]["setupTime"]
@@ -83,6 +95,9 @@ class DIFFCP(scs_conif.SCS):
             status = self.STATUS_MAP[solution["info"]["status"]]
             attr[s.SOLVE_TIME] = solution["info"]["solveTime"]
             attr[s.SETUP_TIME] = solution["info"]["setupTime"]
+        elif solution["solve_method"] == s.CLARABEL:
+            status = self.STATUS_MAP[solution["info"]["status"]]
+            attr[s.SOLVE_TIME] = solution["info"]["solveTime"]
 
         attr[s.NUM_ITERS] = solution["info"]["iter"]
         attr[s.EXTRA_STATS] = solution
@@ -97,12 +112,12 @@ class DIFFCP(scs_conif.SCS):
             }
             eq_dual_vars = utilities.get_dual_values(
                 solution["y"][:inverse_data[ConicSolver.DIMS].zero],
-                self.extract_dual_value,
+                utilities.extract_dual_value,
                 inverse_data[DIFFCP.EQ_CONSTR]
             )
             ineq_dual_vars = utilities.get_dual_values(
                 solution["y"][inverse_data[ConicSolver.DIMS].zero:],
-                self.extract_dual_value,
+                utilities.extract_dual_value,
                 inverse_data[DIFFCP.NEQ_CONSTR]
             )
             dual_vars = {}
@@ -142,7 +157,7 @@ class DIFFCP(scs_conif.SCS):
 
         if solver_opts["solve_method"] == s.SCS:
             import scs
-            if StrictVersion(scs.__version__) < StrictVersion('3.0.0'):
+            if Version(scs.__version__) < Version('3.0.0'):
                 # Default to eps = 1e-4 instead of 1e-3.
                 solver_opts["eps"] = solver_opts.get("eps", 1e-4)
             else:
@@ -168,3 +183,13 @@ class DIFFCP(scs_conif.SCS):
         if solver_cache is not None:
             solver_cache[self.name()] = results
         return results
+
+    def cite(self, data):
+        """Returns bibtex citation for the solver.
+
+        Parameters
+        ----------
+        data : dict
+            Data generated via an apply call.
+        """
+        return CITATION_DICT["DIFFCP"]

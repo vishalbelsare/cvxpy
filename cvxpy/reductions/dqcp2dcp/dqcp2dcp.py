@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 from collections import namedtuple
-from typing import Any, List, Tuple
+from typing import Any
 
 import numpy as np
 
@@ -28,7 +28,7 @@ from cvxpy.expressions.constants.parameter import Parameter
 from cvxpy.expressions.variable import Variable
 from cvxpy.problems.objective import Minimize
 from cvxpy.reductions.canonicalization import Canonicalization
-from cvxpy.reductions.dcp2cone.atom_canonicalizers import CANON_METHODS
+from cvxpy.reductions.dcp2cone.canonicalizers import CANON_METHODS
 from cvxpy.reductions.dqcp2dcp import inverse, sets, tighten
 from cvxpy.reductions.inverse_data import InverseData
 from cvxpy.reductions.solution import Solution
@@ -121,11 +121,11 @@ class Dqcp2Dcp(Canonicalization):
 
     def _canonicalize_tree(self, expr):
         canon_args, constrs = self._canon_args(expr)
-        canon_expr, c = self.canonicalize_expr(expr, canon_args)
+        canon_expr, c = self.canonicalize_expr(expr, canon_args, canonicalize_params=False)
         constrs += c
         return canon_expr, constrs
 
-    def _canon_args(self, expr) -> Tuple[List[Any], List[Any]]:
+    def _canon_args(self, expr) -> tuple[list[Any], list[Any]]:
         """Canonicalize arguments of an expression.
 
         Like Canonicalization.canonicalize_tree, but preserves signs.
@@ -163,6 +163,10 @@ class Dqcp2Dcp(Canonicalization):
         replacing it with its sublevel (superlevel) set. The DCP
         expressions are canonicalized via graph implementations.
         """
+        if constr.is_dcp():
+            canon_constr, aux_constr = self.canonicalize_tree(constr, canonicalize_params=False)
+            return [canon_constr] + aux_constr
+
         lhs = constr.args[0]
         rhs = constr.args[1]
 
@@ -176,10 +180,6 @@ class Dqcp2Dcp(Canonicalization):
             elif np.any(lhs_val == np.inf) or np.any(rhs_val == -np.inf):
                 # constraint is infeasible
                 return [False]
-
-        if constr.is_dcp():
-            canon_constr, aux_constr = self.canonicalize_tree(constr)
-            return [canon_constr] + aux_constr
 
         # canonicalize lhs <= rhs
         # either lhs or rhs is quasiconvex (and not convex)

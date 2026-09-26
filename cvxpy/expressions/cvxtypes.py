@@ -77,6 +77,11 @@ def matmul_expr():
     return binary_operators.MulExpression
 
 
+def matmul():
+    from cvxpy.atoms.affine import binary_operators
+    return binary_operators.matmul
+
+
 def elmul_expr():
     from cvxpy.atoms.affine import binary_operators
     return binary_operators.multiply
@@ -138,8 +143,8 @@ def partial_problem():
 
 
 def power():
-    from cvxpy.atoms.elementwise import power
-    return power.power
+    from cvxpy.atoms.elementwise.power import PowerApprox
+    return PowerApprox
 
 
 def problem():
@@ -165,3 +170,8 @@ def vec():
 def vstack():
     from cvxpy.atoms.affine import vstack
     return vstack.vstack
+
+
+def quad_form():
+    from cvxpy.atoms.quad_form import QuadForm
+    return QuadForm

@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+from __future__ import annotations
 
 from collections import defaultdict
 
@@ -20,36 +21,83 @@ import numpy as np
 import scipy as sp
 
 import cvxpy.settings as s
-from cvxpy.constraints import PSD, SOC, ExpCone, PowCone3D
+from cvxpy.constraints import SOC, ExpCone, PowCone3D, SvecPSD
 from cvxpy.reductions.cone2cone import affine2direct as a2d
-from cvxpy.reductions.cone2cone.affine2direct import Dualize, Slacks
+from cvxpy.reductions.cone2cone.affine2direct import (
+    DUAL_EXP,
+    DUAL_POW3D,
+    EXP,
+    POW3D,
+    Dualize,
+    Slacks,
+)
 from cvxpy.reductions.solution import Solution
 from cvxpy.reductions.solvers.conic_solvers.conic_solver import ConicSolver
 from cvxpy.reductions.solvers.utilities import expcone_permutor
+from cvxpy.utilities.citations import CITATION_DICT
+from cvxpy.utilities.psd_utils import TriangleKind
+from cvxpy.utilities.warn import CvxpyDeprecationWarning, warn
+
+__MSK_ENUM_PARAM_DEPRECATION__ = """
+Using MOSEK constants to specify parameters is deprecated.
+Use generic string names instead.
+For example, replace mosek.iparam.num_threads with 'MSK_IPAR_NUM_THREADS'
+"""
 
 
-def vectorized_lower_tri_to_mat(v, dim):
+def vectorized_lower_tri_to_triples(A: sp.sparse.coo_matrix | sp.sparse.sparray |
+                                        list[float] | np.ndarray, dim: int) \
+                                    -> tuple[list[int], list[int], list[float]]:
     """
-    :param v: a list of length (dim * (dim + 1) / 2)
-    :param dim: the number of rows (equivalently, columns) in the output array.
-    :return: Return the symmetric 2D array defined by taking "v" to
-      specify its lower triangular entries.
+    Attributes
+    ----------
+    A : scipy.sparse.coo_matrix | list[float] | np.ndarray
+        Contains the lower triangular entries of a symmetric matrix, flattened into a 1D array in
+        column-major order.
+    dim : int
+        The number of rows (equivalently, columns) in the original matrix.
+
+    Returns
+    -------
+    rows : list[int]
+        The row indices of the entries in the original matrix.
+    cols : list[int]
+        The column indices of the entries in the original matrix.
+    vals : list[float]
+        The values of the entries in the original matrix.
     """
-    rows, cols, vals = vectorized_lower_tri_to_triples(v, dim)
-    A = sp.sparse.coo_matrix((vals, (rows, cols)), shape=(dim, dim)).toarray()
-    d = np.diag(np.diag(A))
-    A = A + A.T - d
-    return A
 
+    if sp.sparse.issparse(A):
+        vals = A.data
+        flattened_cols = A.col
+        # Ensure that the columns are sorted.
+        if not np.all(flattened_cols[:-1] < flattened_cols[1:]):
+            sort_idx = np.argsort(flattened_cols)
+            vals = vals[sort_idx]
+            flattened_cols = flattened_cols[sort_idx]
+    elif isinstance(A, list):
+        vals = A
+        flattened_cols = np.arange(len(A))
+    elif isinstance(A, np.ndarray):
+        vals = list(A)
+        flattened_cols = np.arange(len(A))
+    else:
+        raise TypeError(f"Expected A to be a coo_matrix, list, or ndarray, "
+                        f"but got {type(A)} instead.")
 
-def vectorized_lower_tri_to_triples(v, dim):
-    rows, cols, vals = [], [], []
-    running_idx = 0
-    for j in range(dim):
-        rows += [j + k for k in range(dim - j)]
-        cols += [j] * (dim - j)
-        vals.extend(v[running_idx:(running_idx + dim - j)])
-        running_idx += dim - j
+    cum_cols = np.cumsum(np.arange(dim, 0, -1))
+    rows, cols = [], []
+    current_col = 0
+    for v in flattened_cols:
+        for c in range(current_col, dim):
+            if v < cum_cols[c]:
+                cols.append(c)
+                prev_row = 0 if c == 0 else cum_cols[c - 1]
+                rows.append(v - prev_row + c)
+                break
+            else:
+                current_col += 1
+
     return rows, cols, vals
 
 
@@ -58,15 +106,20 @@ class MOSEK(ConicSolver):
     """
 
     MIP_CAPABLE = True
-    SUPPORTED_CONSTRAINTS = ConicSolver.SUPPORTED_CONSTRAINTS + [SOC, PSD]
+    SUPPORTED_CONSTRAINTS = ConicSolver.SUPPORTED_CONSTRAINTS + [
+        SOC, SvecPSD, ExpCone, PowCone3D
+    ]
+    PSD_TRIANGLE_KIND = TriangleKind.LOWER
+    PSD_SQRT2_SCALING = False
     EXP_CONE_ORDER = [2, 1, 0]
     DUAL_EXP_CONE_ORDER = [0, 1, 2]
+    # Does not support MISDP.
+    MI_SUPPORTED_CONSTRAINTS = ConicSolver.SUPPORTED_CONSTRAINTS + [
+        SOC, ExpCone, PowCone3D
+    ]
+    REQUIRED_MODULES = ("mosek",)
 
     """
-    Note that MOSEK.SUPPORTED_CONSTRAINTS does not include the exponential cone
-    by default. CVXPY will check for exponential cone support when
-    "import_solver( ... )" or "accepts( ... )" is called.
-
     The cvxpy standard for the exponential cone is:
         K_e = closure{(x,y,z) |  z >= y * exp(x/y), y>0}.
     Whenever a solver uses this convention, EXP_CONE_ORDER should be [0, 1, 2].
@@ -77,13 +130,9 @@ class MOSEK(ConicSolver):
     """
 
     def import_solver(self) -> None:
-        """Imports the solver (updates the set of supported constraints, if applicable).
+        """Imports the solver.
         """
-        import mosek
-        mosek  # For flake8
-        if hasattr(mosek.conetype, 'pexp') and ExpCone not in MOSEK.SUPPORTED_CONSTRAINTS:
-            MOSEK.SUPPORTED_CONSTRAINTS.append(ExpCone)
-            MOSEK.SUPPORTED_CONSTRAINTS.append(PowCone3D)
+        import mosek  # noqa F401
 
     def name(self):
         """The name of the solver.
@@ -106,45 +155,6 @@ class MOSEK(ConicSolver):
         return True
 
     @staticmethod
-    def psd_format_mat(constr):
-        """Return a linear operator to multiply by PSD constraint coefficients.
-
-        Special cases PSD constraints, as MOSEK expects constraints to be
-        imposed on solely the lower triangular part of the variable matrix.
-
-        This function differs from ``SCS.psd_format_mat`` only in that it does not
-        apply sqrt(2) scaling on off-diagonal entries. This difference from SCS is
-        necessary based on how we implement ``MOSEK.bar_data``.
-        """
-        rows = cols = constr.expr.shape[0]
-        entries = rows * (cols + 1)//2
-
-        row_arr = np.arange(0, entries)
-
-        lower_diag_indices = np.tril_indices(rows)
-        col_arr = np.sort(np.ravel_multi_index(lower_diag_indices,
-                                               (rows, cols),
-                                               order='F'))
-
-        val_arr = np.zeros((rows, cols))
-        val_arr[lower_diag_indices] = 1
-        np.fill_diagonal(val_arr, 1.0)
-        val_arr = np.ravel(val_arr, order='F')
-        val_arr = val_arr[np.nonzero(val_arr)]
-
-        shape = (entries, rows*cols)
-        scaled_lower_tri = sp.sparse.csc_matrix((val_arr, (row_arr, col_arr)), shape)
-
-        idx = np.arange(rows * cols)
-        val_symm = 0.5 * np.ones(2 * rows * cols)
-        K = idx.reshape((rows, cols))
-        row_symm = np.append(idx, np.ravel(K, order='F'))
-        col_symm = np.append(idx, np.ravel(K.T, order='F'))
-        symm_matrix = sp.sparse.csc_matrix((val_symm, (row_symm, col_symm)))
-
-        return scaled_lower_tri @ symm_matrix
-
-    @staticmethod
     def bar_data(A_psd, c_psd, K):
         # TODO: investigate how to transform or represent "A_psd" so that the following
         #  indexing and slicing operations are computationally cheap. Or just rewrite
@@ -157,18 +167,17 @@ class MOSEK(ConicSolver):
             A_block = A_psd[:, idx:idx + vec_len]
             # ^ each row specifies a linear operator on PSD variable.
             for i in range(n):
-                A_row = A_block[i, :]
-                if A_row.nnz == 0:
-                    continue
-                A_row = A_row.toarray().ravel()
                 # A_row defines a symmetric matrix by where the first "order" entries
                 #   gives the matrix's first column, the second "order-1" entries gives
-                #   the matrix's second column (diagonal and blow), and so on.
-                rows, cols, vals = vectorized_lower_tri_to_triples(A_row, dim)
-                # TODO: replace the above function with something that only reads the nonzero
-                #  entries. I.e. return *actual* sparse matrix data, rather than data for a dense
-                #  matrix stated in a sparse format.
+                #   the matrix's second column (diagonal and below), and so on.
+                A_row = A_block[[i], :]
+                if A_row.nnz == 0:
+                    continue
+
+                A_row_coo = A_row.tocoo()
+                rows, cols, vals = vectorized_lower_tri_to_triples(A_row_coo, dim)
                 A_bar_data.append((i, j, (rows, cols, vals)))
+
             c_block = c_psd[idx:idx + vec_len]
             rows, cols, vals = vectorized_lower_tri_to_triples(c_block, dim)
             c_bar_data.append((j, (rows, cols, vals)))
@@ -176,8 +185,6 @@ class MOSEK(ConicSolver):
         return A_bar_data, c_bar_data
 
     def apply(self, problem):
-        if not problem.formatted:
-            problem = self.format_constraints(problem, self.EXP_CONE_ORDER)
         if problem.x.boolean_idx or problem.x.integer_idx:  # check if either list is empty
             data, inv_data = Slacks.apply(problem, [a2d.NONNEG])
         else:
@@ -190,7 +197,7 @@ class MOSEK(ConicSolver):
                 total_psd = sum([d * (d+1) // 2 for d in K[a2d.PSD]])
                 A_psd = A[:, idx:idx+total_psd]
                 c_psd = c[idx:idx+total_psd]
-                if K[a2d.DUAL_EXP] == 0:
+                if (K[a2d.DUAL_EXP] == 0) and (K[a2d.DUAL_POW3D] == 0):
                     data[s.A] = A[:, :idx]
                     data[s.C] = c[:idx]
                 else:
@@ -202,7 +209,6 @@ class MOSEK(ConicSolver):
             else:
                 data['A_bar_data'] = []
                 data['c_bar_data'] = []
-
         data[s.PARAM_PROB] = problem
         return data, inv_data
 
@@ -219,28 +225,35 @@ class MOSEK(ConicSolver):
                     sol = Solution(s.OPTIMAL, 0.0, dict(), {s.EQ_DUAL: data[s.B]}, dict())
                     return {'sol': sol}
             else:
-                env = mosek.Env()
-                task = env.Task(0, 0)
+                task = mosek.Task()
+                solver_opts = MOSEK.handle_options(task, verbose, solver_opts)
                 task = MOSEK._build_dualized_task(task, data)
         else:
             if len(data[s.C]) == 0:
                 sol = Solution(s.OPTIMAL, 0.0, dict(), dict(), dict())
                 return {'sol': sol}
             else:
-                env = mosek.Env()
-                task = env.Task(0, 0)
+                task = mosek.Task()
+                solver_opts = MOSEK.handle_options(task, verbose, solver_opts)
                 task = MOSEK._build_slack_task(task, data)
 
-        # Set parameters, optimize the Mosek Task, and return the result.
-        save_file = MOSEK.handle_options(env, task, verbose, solver_opts)
+        # Save the task to a file if requested.
+        save_file = solver_opts['save_file']
         if save_file:
             task.writedata(save_file)
-        task.optimize()
+
+        # Optimize the Mosek Task, and return the result.
+        rescode = task.optimize()
+
+        if rescode == mosek.rescode.trm_max_time:
+            warn(
+                "Optimization terminated by time limit; solution may be imprecise or absent.",
+            )
 
         if verbose:
             task.solutionsummary(mosek.streamtype.msg)
 
-        return {'env': env, 'task': task, 'solver_options': solver_opts}
+        return {'task': task, 'solver_options': solver_opts}
 
     @staticmethod
     def _build_dualized_task(task, data):
@@ -270,21 +283,21 @@ class MOSEK(ConicSolver):
         n, m = A.shape
         task.appendvars(m)
         o = np.zeros(m)
-        task.putvarboundlist(np.arange(m, dtype=int), [mosek.boundkey.fr] * m, o, o)
+        task.putvarboundlist(np.arange(m, dtype=np.int32), [mosek.boundkey.fr] * m, o, o)
         task.appendcons(n)
         # objective
-        task.putclist(np.arange(c.size, dtype=int), c)
+        task.putclist(np.arange(c.size, dtype=np.int32), c)
         task.putobjsense(mosek.objsense.maximize)
         # equality constraints
         rows, cols, vals = sp.sparse.find(A)
         task.putaijlist(rows.tolist(), cols.tolist(), vals.tolist())
-        task.putconboundlist(np.arange(n, dtype=int), [mosek.boundkey.fx] * n, b, b)
+        task.putconboundlist(np.arange(n, dtype=np.int32), [mosek.boundkey.fx] * n, b, b)
         # conic constraints
         idx = K[a2d.FREE]
         num_pos = K[a2d.NONNEG]
         if num_pos > 0:
             o = np.zeros(num_pos)
-            task.putvarboundlist(np.arange(idx, idx + num_pos, dtype=int),
+            task.putvarboundlist(np.arange(idx, idx + num_pos, dtype=np.int32),
                                  [mosek.boundkey.lo] * num_pos, o, o)
             idx += num_pos
         num_soc = len(K[a2d.SOC])
@@ -344,18 +357,36 @@ class MOSEK(ConicSolver):
         # a2d.FREE, then a2d.SOC, then a2d.EXP. PSD is not supported.
         m, n = A.shape
         task.appendvars(n)
-        o = np.zeros(n)
-        task.putvarboundlist(np.arange(n, dtype=int), [mosek.boundkey.fr] * n, o, o)
+        # Create mosek bound keys if variables have bounds
+        if data[s.LOWER_BOUNDS] is not None and data[s.UPPER_BOUNDS] is not None:
+            bl, bu = data[s.LOWER_BOUNDS], data[s.UPPER_BOUNDS]
+            # Initialize bound key array as defined in
+            # https://docs.mosek.com/10.2/pythonapi/constants.html#mosek.boundkey
+            bk = np.empty(n, dtype=np.object_)
+            mask = np.isfinite([bl, bu])
+
+            bk[(~mask[0]) & (~mask[1])] = mosek.boundkey.fr # (free) No bounds
+            bk[(~mask[0]) & mask[1]] = mosek.boundkey.up # Upper bound only
+            bk[mask[0] & (~mask[1])] = mosek.boundkey.lo # Lower bound only
+            bk[mask[0] & mask[1]] = mosek.boundkey.ra # (range) Both bounds
+
+            # Replace infinite values with zeros for free variables
+            bl[~mask[0]] = 0.0
+            bu[~mask[1]] = 0.0
+            task.putvarboundlist(np.arange(n, dtype=np.int32), list(bk), bl, bu)
+        else:
+            o = np.zeros(n)
+            task.putvarboundlist(np.arange(n, dtype=np.int32), [mosek.boundkey.fr] * n, o, o)
         task.appendcons(m)
         # objective
-        task.putclist(np.arange(n, dtype=int), c)
+        task.putclist(np.arange(n, dtype=np.int32), c)
         task.putobjsense(mosek.objsense.minimize)
         # elementwise constraints
         rows, cols, vals = sp.sparse.find(A)
         task.putaijlist(rows, cols, vals)
         eq_keys = [mosek.boundkey.fx] * K_aff[a2d.ZERO]
         ineq_keys = [mosek.boundkey.up] * K_aff[a2d.NONNEG]
-        task.putconboundlist(np.arange(m, dtype=int), eq_keys + ineq_keys, b, b)
+        task.putconboundlist(np.arange(m, dtype=np.int32), eq_keys + ineq_keys, b, b)
         # conic constraints
         idx = K_dir[a2d.FREE]
         num_soc = len(K_dir[a2d.SOC])
@@ -413,21 +444,26 @@ class MOSEK(ConicSolver):
                       mosek.solsta.prim_feas: s.OPTIMAL_INACCURATE,    # for integer problems
                       mosek.solsta.prim_infeas_cer: s.INFEASIBLE,
                       mosek.solsta.dual_infeas_cer: s.UNBOUNDED}
-        # "Near" statuses only up to Mosek 8.1
-        if hasattr(mosek.solsta, 'near_optimal'):
-            STATUS_MAP[mosek.solsta.near_optimal] = s.OPTIMAL_INACCURATE
-            STATUS_MAP[mosek.solsta.near_integer_optimal] = s.OPTIMAL_INACCURATE
-            STATUS_MAP[mosek.solsta.near_prim_infeas_cer] = s.INFEASIBLE_INACCURATE
-            STATUS_MAP[mosek.solsta.near_dual_infeas_cer] = s.UNBOUNDED_INACCURATE
+
+        solver_opts = solver_output['solver_options']
+
+        if solver_opts['accept_unknown']:
+            STATUS_MAP[mosek.solsta.unknown] = s.OPTIMAL_INACCURATE
+
         STATUS_MAP = defaultdict(lambda: s.SOLVER_ERROR, STATUS_MAP)
 
-        env = solver_output['env']
         task = solver_output['task']
         solver_opts = solver_output['solver_options']
+        simplex_algs = [
+            mosek.optimizertype.primal_simplex,
+            mosek.optimizertype.dual_simplex,
+        ]
+        current_optimizer = task.getintparam(mosek.iparam.optimizer)
+        bfs_active = "bfs" in solver_opts and solver_opts["bfs"] and task.getnumcone() == 0
 
         if task.getnumintvar() > 0:
             sol_type = mosek.soltype.itg
-        elif 'bfs' in solver_opts and solver_opts['bfs'] and task.getnumcone() == 0:
+        elif current_optimizer in simplex_algs or bfs_active:
             sol_type = mosek.soltype.bas  # the basic feasible solution
         else:
             sol_type = mosek.soltype.itr  # the solution found via interior point method
@@ -435,19 +471,42 @@ class MOSEK(ConicSolver):
         prim_vars = None
         dual_vars = None
         problem_status = task.getprosta(sol_type)
+        attr = {s.SOLVE_TIME: task.getdouinf(mosek.dinfitem.optimizer_time),
+                s.NUM_ITERS: task.getintinf(mosek.iinfitem.intpnt_iter) +
+                             task.getintinf(mosek.iinfitem.sim_primal_iter) +
+                             task.getintinf(mosek.iinfitem.sim_dual_iter) +
+                             task.getintinf(mosek.iinfitem.mio_num_relax),
+                s.EXTRA_STATS: {
+                    "mio_intpnt_iter": task.getlintinf(mosek.liinfitem.mio_intpnt_iter),
+                    "mio_simplex_iter": task.getlintinf(mosek.liinfitem.mio_simplex_iter)
+                }
+        }
         if sol_type == mosek.soltype.itg and problem_status == mosek.prosta.prim_infeas:
             status = s.INFEASIBLE
             prob_val = np.inf
+        elif problem_status == mosek.prosta.dual_infeas:
+            status = s.UNBOUNDED
+            prob_val = -np.inf
+            # Use the dual variables (primal because dualized) to find the IIS.
+            K = inverse_data["K_dir"]
+            prim_vars = MOSEK.recover_primal_variables(task, sol_type, K)
+            dual_vars = MOSEK.recover_dual_variables(task, sol_type)
+            raw_iis_sol = Solution(s.OPTIMAL, prob_val, prim_vars, dual_vars, attr)
+            iis_sol = Dualize.invert(raw_iis_sol, inverse_data)
+            # IIS is a map of constraint id to a value of
+            # dimension equal to the contraint dual variable.
+            # That value has non-zero entries iff the constraint
+            # is in the IIS.
+            attr[s.EXTRA_STATS] = {"IIS": iis_sol.dual_vars}
         else:
             solsta = task.getsolsta(sol_type)
             status = STATUS_MAP[solsta]
-            prob_val = np.NaN
+            prob_val = np.nan
             if status in s.SOLUTION_PRESENT:
                 prob_val = task.getprimalobj(sol_type)
-                K = inverse_data['K_dir']
+                K = inverse_data["K_dir"]
                 prim_vars = MOSEK.recover_primal_variables(task, sol_type, K)
                 dual_vars = MOSEK.recover_dual_variables(task, sol_type)
-        attr = {s.SOLVE_TIME: task.getdouinf(mosek.dinfitem.optimizer_time)}
         raw_sol = Solution(status, prob_val, prim_vars, dual_vars, attr)
 
         if task.getobjsense() == mosek.objsense.maximize:
@@ -457,7 +516,6 @@ class MOSEK(ConicSolver):
 
         # Delete the mosek Task and Environment
         task.__exit__(None, None, None)
-        env.__exit__(None, None, None)
 
         return sol
 
@@ -524,39 +582,59 @@ class MOSEK(ConicSolver):
             idx += (3 * num_dpow)
         num_psd = len(K_dir[a2d.PSD])
         if num_psd > 0:
+            # getbarxj returns each PSD block as column-major lower-triangular
+            # entries; Dualize consumes this svec form directly (see #3268).
             psd_vars = []
             for j, dim in enumerate(K_dir[a2d.PSD]):
                 xj = [0.] * (dim * (dim + 1) // 2)
                 task.getbarxj(sol, j, xj)
-                psd_vars.append(vectorized_lower_tri_to_mat(xj, dim))
+                psd_vars.append(np.array(xj))
             prim_vars[a2d.PSD] = psd_vars
         return prim_vars
 
     @staticmethod
-    def handle_options(env, task, verbose: bool, solver_opts):
+    def handle_options(task, verbose: bool, solver_opts: dict) -> dict:
+        """
+        Handle user-specified solver options.
+
+        Options that have to be applied before the optimization are applied to the task here.
+        A new dictionary is returned with the processed options and default options applied.
+        """
+
         # If verbose, then set default logging parameters.
         import mosek
 
         if verbose:
 
             def streamprinter(text):
-                s.LOGGER.info(text.replace('\n', ''))
+                s.LOGGER.info(text.rstrip('\n'))
 
             print('\n')
-            env.set_Stream(mosek.streamtype.log, streamprinter)
+
             task.set_Stream(mosek.streamtype.log, streamprinter)
-            task.putintparam(mosek.iparam.infeas_report_auto, mosek.onoffkey.on)
-            task.putintparam(mosek.iparam.log_presolve, 0)
+
+        solver_opts = MOSEK.parse_eps_keyword(solver_opts)
 
         # Parse all user-specified parameters (override default logging
         # parameters if applicable).
-        kwargs = sorted(solver_opts.keys())
-        save_file = None
-        bfs = False
-        if 'mosek_params' in kwargs:
-            for param, value in solver_opts['mosek_params'].items():
-                if isinstance(param, str):
-                    param = param.strip()
+
+        mosek_params = solver_opts.pop('mosek_params', dict())
+        # Issue a warning if Mosek enums are used as parameter names / keys
+        if any(MOSEK.is_param(p) for p in mosek_params):
+            warn(__MSK_ENUM_PARAM_DEPRECATION__, CvxpyDeprecationWarning)
+            warn(__MSK_ENUM_PARAM_DEPRECATION__)
+        # Now set parameters
+        for param, value in mosek_params.items():
+            if isinstance(param, str):
+                # Parameters are set through generic string names (recommended)
+                param = param.strip()
+                if isinstance(value, str):
+                    # The value is also a string.
+                    # Examples: "MSK_IPAR_INTPNT_SOLVE_FORM": "MSK_SOLVE_DUAL"
+                    #           "MSK_DPAR_CO_TOL_PFEAS": "1.0e-9"
+                    task.putparam(param, value)
+                else:
+                    # Otherwise we assume the value is of correct type
                     if param.startswith("MSK_DPAR_"):
                         task.putnadouparam(param, value)
                     elif param.startswith("MSK_IPAR_"):
@@ -565,29 +643,115 @@ class MOSEK(ConicSolver):
                         task.putnastrparam(param, value)
                     else:
                         raise ValueError("Invalid MOSEK parameter '%s'." % param)
+            else:
+                # Parameters are set through Mosek enums (deprecated)
+                if isinstance(param, mosek.dparam):
+                    task.putdouparam(param, value)
+                elif isinstance(param, mosek.iparam):
+                    task.putintparam(param, value)
+                elif isinstance(param, mosek.sparam):
+                    task.putstrparam(param, value)
                 else:
-                    if isinstance(param, mosek.dparam):
-                        task.putdouparam(param, value)
-                    elif isinstance(param, mosek.iparam):
-                        task.putintparam(param, value)
-                    elif isinstance(param, mosek.sparam):
-                        task.putstrparam(param, value)
-                    else:
-                        raise ValueError("Invalid MOSEK parameter '%s'." % param)
-            kwargs.remove('mosek_params')
-        if 'save_file' in kwargs:
-            save_file = solver_opts['save_file']
-            kwargs.remove('save_file')
-        if 'bfs' in kwargs:
-            bfs = solver_opts['bfs']
-            kwargs.remove('bfs')
-        if kwargs:
-            raise ValueError("Invalid keyword-argument '%s'" % kwargs[0])
+                    raise ValueError("Invalid MOSEK parameter '%s'." % param)
+
+        # The options as passed to the solver
+        processed_opts = dict()
+        processed_opts['mosek_params'] = mosek_params
+        processed_opts['save_file'] = solver_opts.pop('save_file', False)
+        processed_opts['bfs'] = solver_opts.pop('bfs', False)
+        processed_opts['accept_unknown'] = solver_opts.pop('accept_unknown', False)
+
+        # Check if any unknown options were passed
+        if solver_opts:
+            raise ValueError(f"Invalid keyword-argument(s) {solver_opts.keys()} passed "
+                             f"to MOSEK solver.")
 
         # Decide whether basis identification is needed for intpnt solver
         # This is only required if solve() was called with bfs=True
-        if bfs:
+        if processed_opts['bfs']:
             task.putintparam(mosek.iparam.intpnt_basis, mosek.basindtype.always)
         else:
             task.putintparam(mosek.iparam.intpnt_basis, mosek.basindtype.never)
-        return save_file
+        return processed_opts
+
+    @staticmethod
+    def is_param(param: object) -> bool:
+        import mosek
+        return isinstance(param, (mosek.iparam, mosek.dparam,  mosek.sparam))
+
+    @staticmethod
+    def parse_eps_keyword(solver_opts: dict) -> dict:
+        """
+        Parse the eps keyword and update the corresponding MOSEK parameters.
+        If additional tolerances are specified explicitly, they take precedence over the
+        eps keyword.
+        """
+
+        if 'eps' not in solver_opts:
+            return solver_opts
+
+        tol_params = MOSEK.tolerance_params()
+        mosek_params = solver_opts.get('mosek_params', dict())
+        assert not any(MOSEK.is_param(p) for p in mosek_params), \
+            "The eps keyword is not compatible with (deprecated) Mosek enum parameters. \
+            Use the string parameters instead."
+        solver_opts['mosek_params'] = mosek_params
+        eps = solver_opts.pop('eps')
+        for tol_param in tol_params:
+            solver_opts['mosek_params'][tol_param] = \
+                solver_opts['mosek_params'].get(tol_param, eps)
+        return solver_opts
+
+    @staticmethod
+    def tolerance_params() -> tuple[str]:
+        # tolerance parameters from
+        # https://docs.mosek.com/latest/pythonapi/param-groups.html
+        return (
+            # Conic interior-point tolerances
+            "MSK_DPAR_INTPNT_CO_TOL_DFEAS",
+            "MSK_DPAR_INTPNT_CO_TOL_INFEAS",
+            "MSK_DPAR_INTPNT_CO_TOL_MU_RED",
+            "MSK_DPAR_INTPNT_CO_TOL_PFEAS",
+            "MSK_DPAR_INTPNT_CO_TOL_REL_GAP",
+            # Interior-point tolerances
+            "MSK_DPAR_INTPNT_TOL_DFEAS",
+            "MSK_DPAR_INTPNT_TOL_INFEAS",
+            "MSK_DPAR_INTPNT_TOL_MU_RED",
+            "MSK_DPAR_INTPNT_TOL_PFEAS",
+            "MSK_DPAR_INTPNT_TOL_REL_GAP",
+            # Simplex tolerances
+            "MSK_DPAR_BASIS_REL_TOL_S",
+            "MSK_DPAR_BASIS_TOL_S",
+            "MSK_DPAR_BASIS_TOL_X",
+            # MIO tolerances
+            "MSK_DPAR_MIO_TOL_ABS_GAP",
+            "MSK_DPAR_MIO_TOL_ABS_RELAX_INT",
+            "MSK_DPAR_MIO_TOL_FEAS",
+            "MSK_DPAR_MIO_TOL_REL_GAP"
+        )
+
+    def cite(self, data):
+        """Returns bibtex citation for the solver.
+
+        Parameters
+        ----------
+        data : dict
+            Data generated via an apply call.
+        """
+        citation = CITATION_DICT['MOSEK']
+
+        # We need another citation if nonsymmetric cones are present.
+        nonsym_cones = False
+        K_dir = data.get('K_dir', dict())
+        if K_dir.get(DUAL_EXP, 0):
+            nonsym_cones = True
+        if K_dir.get(DUAL_POW3D, 0):
+            nonsym_cones = True
+        K_aff = data.get('K_aff', dict())
+        if K_aff.get(EXP, 0):
+            nonsym_cones = True
+        if K_aff.get(POW3D, 0):
+            nonsym_cones = True
+        if nonsym_cones:
+            citation += CITATION_DICT['MOSEK_EXP']
+        return citation

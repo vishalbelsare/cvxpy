@@ -13,21 +13,28 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+from __future__ import annotations
+
 import numbers
-from typing import List, Tuple
+from typing import Literal
 
 import numpy as np
 
 import cvxpy.lin_ops.lin_op as lo
 import cvxpy.lin_ops.lin_utils as lu
+import cvxpy.settings as s
 from cvxpy.atoms.affine.affine_atom import AffAtom
 from cvxpy.atoms.affine.hstack import hstack
 from cvxpy.constraints.constraint import Constraint
-from cvxpy.expressions.expression import Expression
+from cvxpy.expressions.expression import DEFAULT_ORDER_DEPRECATION_MSG, Expression
+from cvxpy.utilities import bounds as bounds_utils
+from cvxpy.utilities.shape import size_from_shape
+from cvxpy.utilities.warn import warn
 
 
 class reshape(AffAtom):
-    """Reshapes the expression.
+    """
+    Reshapes the expression.
 
     Vectorizes the expression then unvectorizes it into the new shape.
     The entries are reshaped and stored in column-major order, also known
@@ -36,22 +43,53 @@ class reshape(AffAtom):
     Parameters
     ----------
     expr : Expression
-       The expression to promote.
+       The expression to reshape
     shape : tuple or int
-        The shape to promote to.
+        The shape to reshape to
     order : F(ortran) or C
     """
 
-    def __init__(self, expr, shape: Tuple[int, int], order: str = 'F') -> None:
+    def __init__(
+        self,
+        expr,
+        shape: int | tuple[int, ...],
+        order: Literal["F", "C", None] = None
+    ) -> None:
         if isinstance(shape, numbers.Integral):
             shape = (int(shape),)
-        if len(shape) > 2:
+        if not s.ALLOW_ND_EXPR and len(shape) > 2:
             raise ValueError("Expressions of dimension greater than 2 "
                              "are not supported.")
+        if any(d == -1 for d in shape):
+            shape = self._infer_shape(shape, expr.size)
+
         self._shape = tuple(shape)
+        if order is None:
+            reshape_order_warning = DEFAULT_ORDER_DEPRECATION_MSG.replace("FUNC_NAME", "reshape")
+            warn(reshape_order_warning, FutureWarning)
+            order = 'F'
         assert order in ['F', 'C']
         self.order = order
         super(reshape, self).__init__(expr)
+
+    @staticmethod
+    def _infer_shape(shape: tuple[int, ...], size: int) -> tuple[int, ...]:
+        assert shape.count(-1) == 1, "Only one dimension can be -1."
+        if len(shape) == 1:
+            shape = (size,)
+        else:
+            unspecified_index = shape.index(-1)
+            specified_dims = [d for i, d in enumerate(shape) if i != unspecified_index]
+            for d in specified_dims:
+                assert d >= 0, "Specified dimension must be nonnegative."
+            divisor = int(np.prod(specified_dims))
+            unspecified, remainder = np.divmod(size, divisor)
+            if remainder != 0:
+                raise ValueError(
+                    f"Cannot reshape expression of size {size} into shape {shape}."
+                )
+            shape = tuple(int(unspecified) if d == -1 else d for d in shape)
+        return shape
 
     def is_atom_log_log_convex(self) -> bool:
         """Is the atom log-log convex?
@@ -63,24 +101,29 @@ class reshape(AffAtom):
         """
         return True
 
+    def bounds_from_args(self) -> tuple[np.ndarray, np.ndarray]:
+        """Returns bounds for reshaped expression."""
+        lb, ub = self.args[0].get_bounds()
+        return bounds_utils.reshape_bounds(lb, ub, self._shape, order=self.order)
+
     @AffAtom.numpy_numeric
     def numeric(self, values):
         """Reshape the value.
         """
-        return np.reshape(values[0], self.shape, self.order)
+        return np.reshape(values[0], self.shape, order=self.order)
 
     def validate_arguments(self) -> None:
         """Checks that the new shape has the same number of entries as the old.
         """
         old_len = self.args[0].size
-        new_len = np.prod(self._shape, dtype=int)
+        new_len = size_from_shape(self._shape)
         if not old_len == new_len:
             raise ValueError(
                 "Invalid reshape dimensions %s." % (self._shape,)
             )
 
-    def shape_from_args(self) -> Tuple[int, ...]:
-        """Returns the shape from the rows, cols arguments.
+    def shape_from_args(self) -> tuple[int, ...]:
+        """Returns the shape argument.
         """
         return self._shape
 
@@ -90,8 +133,8 @@ class reshape(AffAtom):
         return [self._shape, self.order]
 
     def graph_implementation(
-        self, arg_objs, shape: Tuple[int, ...], data=None
-    ) -> Tuple[lo.LinOp, List[Constraint]]:
+        self, arg_objs, shape: tuple[int, ...], data=None
+    ) -> tuple[lo.LinOp, list[Constraint]]:
         """Reshape
 
         Parameters
@@ -116,7 +159,7 @@ class reshape(AffAtom):
             if len(shape) <= 1:
                 return (lu.reshape(arg, shape), [])
             else:
-                result = lu.reshape(arg, (shape[1], shape[0]))
+                result = lu.reshape(arg, shape[::-1])
                 return (lu.transpose(result), [])
 
 
@@ -126,10 +169,10 @@ def deep_flatten(x):
         if len(x.shape) == 1:
             return x
         else:
-            return x.flatten()
+            return x.flatten(order='F')
     elif isinstance(x, np.ndarray) or isinstance(x, (int, float)):
-        x = Expression.cast_to_const(x)
-        return x.flatten()
+        x = Expression.cast(x)
+        return x.flatten(order='F')
     # recursion
     if isinstance(x, list):
         y = []

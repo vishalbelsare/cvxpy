@@ -1,0 +1,40 @@
+name: test_backends
+
+on:
+    pull_request:
+    push:
+        branches:
+            - master
+        tags:
+          - '*'
+
+jobs:
+  test_backends:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [SCIPY, COO]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # setuptools-scm needs tags to compute the version
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install cvxpy dependencies
+        run: |
+          uv venv
+          uv pip install -e ".[testing]"
+
+      - name: Run tests with ${{ matrix.backend }} backend
+        env:
+          CVXPY_DEFAULT_CANON_BACKEND: ${{ matrix.backend }}
+        run: |
+          uv run python -c "from cvxpy.cvxcore.python.canonInterface import get_default_canon_backend; print(get_default_canon_backend())"
+          uv run python -c "from cvxpy.cvxcore.python.canonInterface import get_default_canon_backend; assert get_default_canon_backend() == '${{ matrix.backend }}'"
+          uv run pytest

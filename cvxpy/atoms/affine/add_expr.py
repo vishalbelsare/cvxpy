@@ -14,34 +14,37 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 import operator as op
+from collections.abc import Iterable
 from functools import reduce
-from typing import List, Tuple
+from typing import Any
+
+import numpy as np
 
 import cvxpy.lin_ops.lin_op as lo
 import cvxpy.lin_ops.lin_utils as lu
 import cvxpy.utilities as u
 from cvxpy.atoms.affine.affine_atom import AffAtom
 from cvxpy.constraints.constraint import Constraint
+from cvxpy.expressions.expression import Expression
+from cvxpy.utilities import bounds as bounds_utils
 
 
 class AddExpression(AffAtom):
     """The sum of any number of expressions.
     """
 
-    def __init__(self, arg_groups) -> None:
-        # For efficiency group args as sums.
-        self._arg_groups = arg_groups
+    def __init__(self, arg_groups: Iterable[Expression]) -> None:
         super(AddExpression, self).__init__(*arg_groups)
         self.args = []
         for group in arg_groups:
             self.args += self.expand_args(group)
 
-    def shape_from_args(self) -> Tuple[int, ...]:
+    def shape_from_args(self) -> tuple[int, ...]:
         """Returns the (row, col) shape of the expression.
         """
         return u.shape.sum_shapes([arg.shape for arg in self.args])
 
-    def expand_args(self, expr):
+    def expand_args(self, expr: Expression) -> list[Expression]:
         """Helper function to extract the arguments from an AddExpression.
         """
         if isinstance(expr, AddExpression):
@@ -55,7 +58,19 @@ class AddExpression(AffAtom):
             result += " + " + str(self.args[i])
         return result
 
-    def numeric(self, values):
+    def format_labeled(self):
+        """Format addition with labels where available."""
+        # Check for own label first
+        if self._label is not None:
+            return self._label
+
+        # Build from sub-expressions using their labels
+        result = self.args[0].format_labeled()
+        for i in range(1, len(self.args)):
+            result += " + " + self.args[i].format_labeled()
+        return result
+
+    def numeric(self, values: Iterable[Any]) -> Any:
         return reduce(op.add, values)
 
     def is_atom_log_log_convex(self) -> bool:
@@ -67,6 +82,19 @@ class AddExpression(AffAtom):
         """Is the atom log-log concave?
         """
         return False
+
+    def bounds_from_args(self) -> tuple[np.ndarray, np.ndarray]:
+        """Returns bounds for addition based on argument bounds."""
+        # Start with first argument's bounds
+        lb, ub = self.args[0].get_bounds()
+        # Broadcast to output shape if needed
+        lb, ub = bounds_utils.broadcast_bounds(lb, ub, self.shape)
+        # Add remaining arguments
+        for arg in self.args[1:]:
+            arg_lb, arg_ub = arg.get_bounds()
+            arg_lb, arg_ub = bounds_utils.broadcast_bounds(arg_lb, arg_ub, self.shape)
+            lb, ub = bounds_utils.add_bounds(lb, ub, arg_lb, arg_ub)
+        return (lb, ub)
 
     def is_symmetric(self) -> bool:
         """Is the expression symmetric?
@@ -82,7 +110,7 @@ class AddExpression(AffAtom):
 
     # As __init__ takes in the arg_groups instead of args, we need a special
     # copy() function.
-    def copy(self, args=None, id_objects=None):
+    def copy(self, args=None, id_objects=None) -> 'AddExpression':
         """Returns a shallow copy of the AddExpression atom.
 
         Parameters
@@ -96,15 +124,18 @@ class AddExpression(AffAtom):
         AddExpression atom
         """
         if args is None:
-            args = self._arg_groups
-        # Takes advantage of _arg_groups if present for efficiency.
+            # The __init__ method of AddExpression recreates the args,
+            # but passes *arg_groups to the super class for checks.
+            # Since these checks are already done for self, we pass [self], i.e.,
+            # a single [AddExpression], before the args are recreated.
+            args = [self]
         copy = type(self).__new__(type(self))
         copy.__init__(args)
         return copy
 
     def graph_implementation(
-        self, arg_objs, shape: Tuple[int, ...], data=None
-    ) -> Tuple[lo.LinOp, List[Constraint]]:
+        self, arg_objs, shape: tuple[int, ...], data=None
+    ) -> tuple[lo.LinOp, list[Constraint]]:
         """Sum the linear expressions.
 
         Parameters

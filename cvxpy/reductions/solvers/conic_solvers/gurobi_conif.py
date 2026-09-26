@@ -22,7 +22,10 @@ from cvxpy.constraints import SOC
 from cvxpy.reductions.solution import Solution, failure_solution
 from cvxpy.reductions.solvers import utilities
 from cvxpy.reductions.solvers.conic_solvers.conic_solver import (
-    ConicSolver, dims_to_solver_dict,)
+    ConicSolver,
+    dims_to_solver_dict,
+)
+from cvxpy.utilities.citations import CITATION_DICT
 
 
 class GUROBI(ConicSolver):
@@ -32,7 +35,13 @@ class GUROBI(ConicSolver):
 
     # Solver capabilities.
     MIP_CAPABLE = True
+    BOUNDED_VARIABLES = True
     SUPPORTED_CONSTRAINTS = ConicSolver.SUPPORTED_CONSTRAINTS + [SOC]
+    MI_SUPPORTED_CONSTRAINTS = SUPPORTED_CONSTRAINTS
+    REQUIRED_MODULES = ("gurobipy",)
+
+    # Keyword arguments for the CVXPY interface.
+    INTERFACE_ARGS = ["save_file", "reoptimize"]
 
     # Map of Gurobi status to CVXPY status.
     STATUS_MAP = {2: s.OPTIMAL,
@@ -40,15 +49,17 @@ class GUROBI(ConicSolver):
                   4: s.INFEASIBLE_OR_UNBOUNDED,  # Triggers reoptimize.
                   5: s.UNBOUNDED,
                   6: s.SOLVER_ERROR,
-                  7: s.SOLVER_ERROR,
-                  8: s.SOLVER_ERROR,
-                  # TODO could be anything.
-                  # means time expired.
-                  9: s.USER_LIMIT,
-                  10: s.SOLVER_ERROR,
-                  11: s.SOLVER_ERROR,
-                  12: s.SOLVER_ERROR,
-                  13: s.SOLVER_ERROR}
+                  7: s.USER_LIMIT, # ITERATION_LIMIT
+                  8: s.USER_LIMIT, # NODE_LIMIT
+                  9: s.USER_LIMIT,  # TIME_LIMIT
+                  10: s.USER_LIMIT, # SOLUTION_LIMIT
+                  11: s.USER_LIMIT, # INTERRUPTED
+                  12: s.SOLVER_ERROR, # NUMERIC
+                  13: s.USER_LIMIT, # SUBOPTIMAL
+                  14: s.USER_LIMIT, # INPROGRESS
+                  15: s.USER_LIMIT, # USER_OBJ_LIMIT
+                  16: s.USER_LIMIT, # WORK_LIMIT
+                  17: s.USER_LIMIT} # MEM_LIMIT
 
     def name(self):
         """The name of the solver.
@@ -58,8 +69,7 @@ class GUROBI(ConicSolver):
     def import_solver(self) -> None:
         """Imports the solver.
         """
-        import gurobipy
-        gurobipy  # For flake8
+        import gurobipy  # noqa F401
 
     def accepts(self, problem) -> bool:
         """Can Gurobi solve the problem?
@@ -83,11 +93,15 @@ class GUROBI(ConicSolver):
         tuple
             (dict of arguments needed for the solver, inverse data)
         """
+        import gurobipy as grb
         data, inv_data = super(GUROBI, self).apply(problem)
         variables = problem.x
         data[s.BOOL_IDX] = [int(t[0]) for t in variables.boolean_idx]
         data[s.INT_IDX] = [int(t[0]) for t in variables.integer_idx]
         inv_data['is_mip'] = data[s.BOOL_IDX] or data[s.INT_IDX]
+
+        # Add initial guess.
+        data['init_value'] = utilities.stack_vals(problem.variables, grb.GRB.UNDEFINED)
 
         return data, inv_data
 
@@ -95,8 +109,12 @@ class GUROBI(ConicSolver):
         """Returns the solution to the original problem given the inverse_data.
         """
         status = solution['status']
+
+        bar_iter_count = getattr(solution["model"], "BarIterCount", 0)
+
         attr = {s.EXTRA_STATS: solution['model'],
-                s.SOLVE_TIME: solution[s.SOLVE_TIME]}
+                s.SOLVE_TIME: solution[s.SOLVE_TIME],
+                s.NUM_ITERS: bar_iter_count}
 
         primal_vars = None
         dual_vars = None
@@ -141,10 +159,16 @@ class GUROBI(ConicSolver):
 
         c = data[s.C]
         b = data[s.B]
-        A = sp.csr_matrix(data[s.A])
+        A = sp.csr_array(data[s.A])
         dims = dims_to_solver_dict(data[s.DIMS])
+        lb = data[s.LOWER_BOUNDS]
+        ub = data[s.UPPER_BOUNDS]
 
         n = c.shape[0]
+        if lb is None:
+            lb = np.full(n, -gurobipy.GRB.INFINITY)
+        if ub is None:
+            ub = np.full(n, gurobipy.GRB.INFINITY)
 
         # Create a new model
         if 'env' in solver_opts:
@@ -160,63 +184,65 @@ class GUROBI(ConicSolver):
         # Pass through verbosity
         model.setParam("OutputFlag", verbose)
 
-        variables = []
-        for i in range(n):
-            # Set variable type.
-            if i in data[s.BOOL_IDX]:
-                vtype = gurobipy.GRB.BINARY
-            elif i in data[s.INT_IDX]:
-                vtype = gurobipy.GRB.INTEGER
-            else:
-                vtype = gurobipy.GRB.CONTINUOUS
-            variables.append(
-                model.addVar(
-                    obj=c[i],
-                    name="x_%d" % i,
-                    vtype=vtype,
-                    # Gurobi's default LB is 0 (WHY???)
-                    lb=-gurobipy.GRB.INFINITY,
-                    ub=gurobipy.GRB.INFINITY)
-            )
+        bool_idx = data[s.BOOL_IDX]
+        int_idx = data[s.INT_IDX]
+        is_mip = bool(bool_idx or int_idx)
+        vtypes = np.full(n, gurobipy.GRB.CONTINUOUS, dtype="<U1")
+        if bool_idx:
+            vtypes[bool_idx] = gurobipy.GRB.BINARY
+        if int_idx:
+            vtypes[int_idx] = gurobipy.GRB.INTEGER
+        vtypes = vtypes.tolist()
+        names = ["x_%d" % i for i in range(n)]
+
+        x = model.addMVar(n, lb=lb, ub=ub, obj=c, vtype=vtypes, name=names)
         model.update()
+
+        # Set the start value of Gurobi vars to user provided values.
+        start_vals = None
+        if warm_start and solver_cache is not None \
+                and self.name() in solver_cache:
+            old_model = solver_cache[self.name()]
+            old_status = self.STATUS_MAP.get(old_model.Status,
+                                             s.SOLVER_ERROR)
+            if (old_status in s.SOLUTION_PRESENT) or (old_model.solCount > 0):
+                # The cached model also holds the auxiliary SOC variables, which
+                # are appended after the n problem variables.
+                start_vals = gurobipy.MVar.fromlist(old_model.getVars()[:n]).X
+        elif warm_start:
+            start_vals = data['init_value'][:n]
+        if start_vals is not None:
+            x.Start = np.asarray(start_vals)
 
         leq_start = dims[s.EQ_DIM]
         leq_end = dims[s.EQ_DIM] + dims[s.LEQ_DIM]
-        if hasattr(model, 'addMConstrs'):
-            eq_constrs = model.addMConstrs(
-                A[:leq_start, :], None, gurobipy.GRB.EQUAL, b[:leq_start])
-            ineq_constrs = model.addMConstrs(
-                A[leq_start:leq_end, :], None, gurobipy.GRB.LESS_EQUAL, b[leq_start:leq_end])
-        else:
-            eq_constrs = self.add_model_lin_constr(model, variables,
-                                                   range(dims[s.EQ_DIM]),
-                                                   gurobipy.GRB.EQUAL,
-                                                   A, b)
-            ineq_constrs = self.add_model_lin_constr(model, variables,
-                                                     range(leq_start, leq_end),
-                                                     gurobipy.GRB.LESS_EQUAL,
-                                                     A, b)
+        eq_constrs = model.addMConstr(
+            A[:leq_start, :], None, gurobipy.GRB.EQUAL, b[:leq_start]
+        ).tolist()
+        ineq_constrs = model.addMConstr(
+            A[leq_start:leq_end, :], None, gurobipy.GRB.LESS_EQUAL,
+            b[leq_start:leq_end]).tolist()
 
-        # TODO: add all SOC constrs at once! Be careful with return values
+        soc_dims = dims[s.SOC_DIM]
         soc_start = leq_end
         soc_constrs = []
         new_leq_constrs = []
-        for constr_len in dims[s.SOC_DIM]:
-            soc_end = soc_start + constr_len
-            soc_constr, new_leq, new_vars = self.add_model_soc_constr(
-                model, variables, range(soc_start, soc_end),
-                A, b
+        if soc_dims:
+            soc_constrs, new_leq_constrs = self.add_model_soc_constrs(
+                model, soc_start, soc_dims, A, b
             )
-            soc_constrs.append(soc_constr)
-            new_leq_constrs += new_leq
-            variables += new_vars
-            soc_start += constr_len
+
+        # Save file (*.mst, *.sol, ect.)
+        if 'save_file' in solver_opts:
+            model.write(solver_opts['save_file'])
 
         # Set parameters
         # TODO user option to not compute duals.
         model.setParam("QCPDual", True)
         for key, value in solver_opts.items():
-            model.setParam(key, value)
+            # Ignore arguments unique to the CVXPY interface.
+            if key not in self.INTERFACE_ARGS:
+                model.setParam(key, value)
 
         solution = {}
         try:
@@ -226,13 +252,15 @@ class GUROBI(ConicSolver):
                 model.setParam("DualReductions", 0)
                 model.optimize()
             solution["value"] = model.ObjVal
-            solution["primal"] = np.array([v.X for v in variables])
+            # ``x`` covers only the n problem columns. The SOC auxiliary
+            # variables that follow them are internal to this interface.
+            solution["primal"] = np.array(x.X)
 
             # Only add duals if not a MIP.
             # Not sure why we need to negate the following,
             # but need to in order to be consistent with other solvers.
             vals = []
-            if not (data[s.BOOL_IDX] or data[s.INT_IDX]):
+            if not is_mip:
                 lin_constrs = eq_constrs + ineq_constrs + new_leq_constrs
                 vals += model.getAttr('Pi', lin_constrs)
                 vals += model.getAttr('QCPi', soc_constrs)
@@ -250,58 +278,29 @@ class GUROBI(ConicSolver):
             solution["status"] = s.INFEASIBLE_INACCURATE
         solution["model"] = model
 
+        # Save model for warm start.
+        if solver_cache is not None:
+            solver_cache[self.name()] = model
+
         return solution
 
-    def add_model_lin_constr(self, model, variables,
-                             rows, ctype,
-                             mat, vec):
-        """Adds EQ/LEQ constraints to the model using the data from mat and vec.
+    def add_model_soc_constrs(self, model, soc_start, soc_dims, mat, vec):
+        """Adds every SOC constraint to the model in a handful of calls.
+
+        Each cone ``|| x ||_2 <= t`` over rows ``r`` of ``mat``/``vec`` is
+        modelled with one auxiliary variable per row, tied to the problem
+        variables by ``aux = vec[r] - mat[r, :] @ x``, plus one quadratic
+        constraint per cone. Requires the Gurobi v9.5+ matrix API.
 
         Parameters
         ----------
         model : GUROBI model
             The problem model.
-        variables : list
-            The problem variables.
-        rows : range
-            The rows to be constrained.
-        ctype : GUROBI constraint type
-            The type of constraint.
-        mat : SciPy COO matrix
-            The matrix representing the constraints.
-        vec : NDArray
-            The constant part of the constraints.
-
-        Returns
-        -------
-        list
-            A list of constraints.
-        """
-        import gurobipy as gp
-
-        constr = []
-        for i in rows:
-            start = mat.indptr[i]
-            end = mat.indptr[i + 1]
-            x = [variables[j] for j in mat.indices[start:end]]
-            coeff = mat.data[start:end]
-            expr = gp.LinExpr(coeff, x)
-            constr.append(model.addLConstr(expr, ctype, vec[i]))
-        return constr
-
-    def add_model_soc_constr(self, model, variables,
-                             rows, mat, vec):
-        """Adds SOC constraint to the model using the data from mat and vec.
-
-        Parameters
-        ----------
-        model : GUROBI model
-            The problem model.
-        variables : list
-            The problem variables.
-        rows : range
-            The rows to be constrained.
-        mat : SciPy COO matrix
+        soc_start : int
+            The first row of mat/vec belonging to an SOC constraint.
+        soc_dims : list
+            The length of each SOC constraint.
+        mat : SciPy CSR matrix
             The matrix representing the constraints.
         vec : NDArray
             The constant part of the constraints.
@@ -309,42 +308,55 @@ class GUROBI(ConicSolver):
         Returns
         -------
         tuple
-            A tuple of (QConstr, list of Constr, and list of variables).
+            A tuple of (list of QConstr, list of Constr).
         """
         import gurobipy as gp
 
-        # Make a variable and equality constraint for each term.
-        soc_vars = [
-            model.addVar(
-                obj=0,
-                name="soc_t_%d" % rows[0],
-                vtype=gp.GRB.CONTINUOUS,
-                lb=0,
-                ub=gp.GRB.INFINITY)
-        ]
-        for i in rows[1:]:
-            soc_vars += [
-                model.addVar(
-                    obj=0,
-                    name="soc_x_%d" % i,
-                    vtype=gp.GRB.CONTINUOUS,
-                    lb=-gp.GRB.INFINITY,
-                    ub=gp.GRB.INFINITY)
-            ]
+        num_rows = int(np.sum(soc_dims))
+        soc_end = soc_start + num_rows
+        # Position of each cone's ``t`` variable within the SOC block.
+        heads = np.concatenate(([0], np.cumsum(soc_dims)[:-1])).astype(int)
 
-        new_lin_constrs = []
-        for i, row in enumerate(rows):
-            start = mat.indptr[row]
-            end = mat.indptr[row + 1]
-            x = [variables[j] for j in mat.indices[start:end]]
-            coeff = -mat.data[start:end]
-            expr = gp.LinExpr(coeff, x)
-            expr.addConstant(vec[row])
-            new_lin_constrs.append(model.addLConstr(soc_vars[i], gp.GRB.EQUAL, expr))
+        aux_lb = np.full(num_rows, -gp.GRB.INFINITY)
+        aux_lb[heads] = 0.0
+        aux_names = ["soc_x_%d" % i for i in range(soc_start, soc_end)]
+        for head in heads:
+            aux_names[head] = "soc_t_%d" % (soc_start + head)
+        aux_vars = model.addMVar(num_rows, obj=0.0, lb=aux_lb,
+                                 ub=gp.GRB.INFINITY, name=aux_names)
 
-        t_term = soc_vars[0]*soc_vars[0]
-        x_term = gp.QuadExpr()
-        x_term.addTerms(np.ones(len(rows) - 1), soc_vars[1:], soc_vars[1:])
-        return (model.addQConstr(x_term <= t_term),
-                new_lin_constrs,
-                soc_vars)
+        # aux == vec - mat @ x, written as [mat | I] @ [x; aux] == vec so that
+        # it can be passed to Gurobi as a single matrix constraint. Passing None
+        # for the variables uses every variable in the model, in creation order.
+        coupling = sp.hstack(
+            [mat[soc_start:soc_end, :], sp.eye_array(num_rows, format="csr")],
+            format="csr")
+        new_lin_constrs = model.addMConstr(
+            coupling, None, gp.GRB.EQUAL, vec[soc_start:soc_end]).tolist()
+
+        # Gurobi has no bulk API for quadratic constraints, but each cone needs
+        # only a single QuadExpr, x'x - t^2 <= 0, and hence a single addTerms
+        # call: the coefficients are always -1 on the leading t followed by 1 on
+        # the tail, so one shared buffer can be sliced for every cone.
+        aux_list = aux_vars.tolist()
+        coeffs = np.ones(int(np.max(soc_dims)))
+        coeffs[0] = -1.0
+        soc_constrs = []
+        offset = 0
+        for constr_len in soc_dims:
+            block = aux_list[offset:offset + constr_len]
+            expr = gp.QuadExpr()
+            expr.addTerms(coeffs[:constr_len], block, block)
+            soc_constrs.append(model.addQConstr(expr, gp.GRB.LESS_EQUAL, 0.0))
+            offset += constr_len
+        return soc_constrs, new_lin_constrs
+
+    def cite(self, data):
+        """Returns bibtex citation for the solver.
+
+        Parameters
+        ----------
+        data : dict
+            Data generated via an apply call.
+        """
+        return CITATION_DICT["GUROBI"]

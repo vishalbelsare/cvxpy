@@ -19,6 +19,7 @@ import cvxpy.settings as s
 from cvxpy.reductions.solution import Solution, failure_solution
 from cvxpy.reductions.solvers.conic_solvers import GLPK
 from cvxpy.reductions.solvers.conic_solvers.conic_solver import ConicSolver
+from cvxpy.utilities.citations import CITATION_DICT
 
 
 class GLPK_MI(GLPK):
@@ -28,6 +29,7 @@ class GLPK_MI(GLPK):
     # Solver capabilities.
     MIP_CAPABLE = True
     SUPPORTED_CONSTRAINTS = ConicSolver.SUPPORTED_CONSTRAINTS
+    MI_SUPPORTED_CONSTRAINTS = SUPPORTED_CONSTRAINTS
 
     def name(self):
         """The name of the solver.
@@ -59,6 +61,8 @@ class GLPK_MI(GLPK):
             cvxopt.glpk.options["msg_lev"] = "GLP_MSG_ON"
         else:
             cvxopt.glpk.options["msg_lev"] = "GLP_MSG_OFF"
+
+        data = self._prepare_cvxopt_matrices(data)
 
         # Apply any user-specific options.
         # Rename max_iters to maxiters.
@@ -108,3 +112,22 @@ class GLPK_MI(GLPK):
             return Solution(status, opt_val, primal_vars, None, {})
         else:
             return failure_solution(status)
+
+    @staticmethod
+    def _restore_solver_options(old_options) -> None:
+        import cvxopt.glpk
+        for key, value in list(cvxopt.glpk.options.items()):
+            if key in old_options:
+                cvxopt.glpk.options[key] = old_options[key]
+            else:
+                del cvxopt.glpk.options[key]
+
+    def cite(self, data):
+        """Returns bibtex citation for the solver.
+
+        Parameters
+        ----------
+        data : dict
+            Data generated via an apply call.
+        """
+        return CITATION_DICT["GLPK"]

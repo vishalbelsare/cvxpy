@@ -12,14 +12,37 @@ cummax
 .. autoclass:: cvxpy.atoms.cummax.cummax
     :show-inheritance:
 
-.. _diff-pos:
+.. _cumprod:
+
+cumprod
+---------
+
+.. autoclass:: cvxpy.atoms.cumprod.cumprod
+    :show-inheritance:
+
+.. _cvar:
+
+cvar
+--------
+
+.. autofunction:: cvxpy.atoms.cvar.cvar
+
+.. _diff_pos:
 
 diff_pos
 --------
 
-.. autofunction:: cvxpy.atoms.one_minus.diff_pos
+.. autofunction:: cvxpy.atoms.one_minus_pos.diff_pos
 
-.. _eye-minus-inv:
+.. _diff_pos:
+
+.. _dotsort:
+
+dotsort
+---------------------------------
+
+.. autoclass:: cvxpy.atoms.dotsort.dotsort
+    :show-inheritance:
 
 eye_minus_inv
 --------------
@@ -152,7 +175,6 @@ norm2
 --------------------------
 
 .. autofunction:: cvxpy.atoms.norm.norm2
-    :show-inheritance:
 
 .. _norm-inf:
 
@@ -178,6 +200,14 @@ one_minus_pos
 .. autoclass:: cvxpy.atoms.one_minus_pos
     :show-inheritance:
 
+.. _perspective:
+
+perspective
+------------------------------
+
+.. autoclass:: cvxpy.atoms.perspective.perspective
+    :show-inheritance:
+
 .. _pf-eigenvalue:
 
 pf_eigenvalue
@@ -199,6 +229,13 @@ Pnorm
 --------------------------
 
 .. autoclass:: cvxpy.atoms.pnorm.Pnorm
+
+.. _ptp:
+
+ptp
+--------------------------
+
+.. autofunction:: cvxpy.atoms.ptp.ptp
 
 .. _prod:
 
@@ -237,6 +274,13 @@ sigma_max
 .. autoclass:: cvxpy.atoms.sigma_max.sigma_max
     :show-inheritance:
 
+.. _std:
+
+std
+-------------------------------
+
+.. autofunction:: cvxpy.atoms.stats.std
+
 .. _sum-largest:
 
 sum_largest
@@ -259,9 +303,40 @@ sum_squares
 
 .. autofunction:: cvxpy.atoms.sum_squares.sum_squares
 
+
+.. _suppfuncatom:
+
+SuppFuncAtom
+------------
+
+.. autoclass:: cvxpy.atoms.suppfunc.SuppFuncAtom
+
+.. _tr_inv:
+
+tr_inv
+-------------------------------------
+
+.. autofunction:: cvxpy.atoms.tr_inv.tr_inv
+
 .. _tv:
 
 tv
 -------------------------------------
 
 .. autofunction:: cvxpy.atoms.total_variation.tv
+
+.. _var:
+
+var
+-------------------------------------
+
+.. autofunction:: cvxpy.atoms.stats.var
+
+
+.. _von-neumann-entr:
+
+von_neumann_entr
+--------------------------------------
+
+.. autoclass:: cvxpy.von_neumann_entr
+    :show-inheritance:

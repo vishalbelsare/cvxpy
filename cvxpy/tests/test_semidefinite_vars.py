@@ -16,7 +16,7 @@ limitations under the License.
 
 import numpy as np
 
-import cvxpy as cvx
+import cvxpy as cp
 from cvxpy.expressions.variable import Variable
 from cvxpy.tests.base_test import BaseTest
 
@@ -39,16 +39,16 @@ class TestSemidefiniteVariable(BaseTest):
         x2 = Variable((3, 3), PSD=True)
         constraints = [M + C1 == x1]
         constraints += [M + C2 == x2]
-        objective = cvx.Minimize(cvx.trace(M))
-        prob = cvx.Problem(objective, constraints)
+        objective = cp.Minimize(cp.trace(M))
+        prob = cp.Problem(objective, constraints)
         prob.solve(solver="SCS")
         assert (M.value == M.T.value).all()
 
     def test_sdp_problem(self) -> None:
         # PSD in objective.
-        obj = cvx.Minimize(cvx.sum(cvx.square(self.X - self.F)))
-        p = cvx.Problem(obj, [])
-        result = p.solve(solver="SCS")
+        obj = cp.Minimize(cp.sum(cp.square(self.X - self.F)))
+        p = cp.Problem(obj, [])
+        result = p.solve(solver=cp.CLARABEL)
         self.assertAlmostEqual(result, 1, places=4)
 
         self.assertAlmostEqual(self.X.value[0, 0], 1, places=3)
@@ -58,9 +58,9 @@ class TestSemidefiniteVariable(BaseTest):
 
         # PSD in constraint.
         # ECHU: note to self, apparently this is a source of redundancy
-        obj = cvx.Minimize(cvx.sum(cvx.square(self.Y - self.F)))
-        p = cvx.Problem(obj, [self.Y == Variable((2, 2), PSD=True)])
-        result = p.solve(solver="SCS")
+        obj = cp.Minimize(cp.sum(cp.square(self.Y - self.F)))
+        p = cp.Problem(obj, [self.Y == Variable((2, 2), PSD=True)])
+        result = p.solve(solver=cp.CLARABEL)
         self.assertAlmostEqual(result, 1, places=2)
 
         self.assertAlmostEqual(self.Y.value[0, 0], 1, places=3)
@@ -69,12 +69,12 @@ class TestSemidefiniteVariable(BaseTest):
         self.assertAlmostEqual(self.Y.value[1, 1], 0, places=3)
 
         # Index into semidef.
-        obj = cvx.Minimize(cvx.square(self.X[0, 0] - 1) +
-                           cvx.square(self.X[1, 0] - 2) +
+        obj = cp.Minimize(cp.square(self.X[0, 0] - 1) +
+                           cp.square(self.X[1, 0] - 2) +
                            # square(self.X[0,1] - 3) +
-                           cvx.square(self.X[1, 1] - 4))
-        p = cvx.Problem(obj, [])
-        result = p.solve(solver="SCS")
+                           cp.square(self.X[1, 1] - 4))
+        p = cp.Problem(obj, [])
+        result = p.solve(solver=cp.CLARABEL)
         print(self.X.value)
         self.assertAlmostEqual(result, 0)
 

@@ -31,11 +31,6 @@ class Zero(Constraint):
     def __init__(self, expr, constr_id=None) -> None:
         super(Zero, self).__init__([expr], constr_id)
 
-    def __str__(self):
-        """Returns a string showing the mathematical constraint.
-        """
-        return self.name()
-
     def __repr__(self) -> str:
         """Returns a string with information about the constraint.
         """
@@ -62,6 +57,10 @@ class Zero(Constraint):
                 return self.args[0].is_affine()
         return self.args[0].is_affine()
 
+    def is_dnlp(self) -> bool:
+        """A zero constraint is DNLP if its argument is smooth representable."""
+        return self.args[0].is_smooth()
+
     def is_dgp(self, dpp: bool = False) -> bool:
         return False
 
@@ -78,7 +77,14 @@ class Zero(Constraint):
         """
         if self.expr.value is None:
             return None
-        return np.abs(self.expr.value)
+        return -self.expr.value
+
+    @property
+    def dual_residual(self):
+        dv = self.dual_variables[0].value
+        if dv is None:
+            return None
+        return np.zeros(self.dual_variables[0].shape)
 
     # The value of the dual variable.
     @property
@@ -102,11 +108,6 @@ class Equality(Constraint):
     def __init__(self, lhs, rhs, constr_id=None) -> None:
         self._expr = lhs - rhs
         super(Equality, self).__init__([lhs, rhs], constr_id)
-
-    def __str__(self):
-        """Returns a string showing the mathematical constraint.
-        """
-        return self.name()
 
     def __repr__(self) -> str:
         """Returns a string with information about the constraint.
@@ -141,6 +142,10 @@ class Equality(Constraint):
                 return self.expr.is_affine()
         return self.expr.is_affine()
 
+    def is_dnlp(self) -> bool:
+        """An equality constraint is DNLP if its argument is smooth representable."""
+        return self.expr.is_smooth()
+
     def is_dgp(self, dpp: bool = False) -> bool:
         if dpp:
             with scopes.dpp_scope():
@@ -162,7 +167,14 @@ class Equality(Constraint):
         """
         if self.expr.value is None:
             return None
-        return np.abs(self.expr.value)
+        return -self.expr.value
+
+    @property
+    def dual_residual(self):
+        dv = self.dual_variables[0].value
+        if dv is None:
+            return None
+        return np.zeros(self.dual_variables[0].shape)
 
     @property
     def dual_value(self):

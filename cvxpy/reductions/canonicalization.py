@@ -14,12 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+from typing import overload
+
 from cvxpy import problems
+from cvxpy.constraints.constraint import Constraint
 from cvxpy.expressions import cvxtypes
 from cvxpy.expressions.expression import Expression
+from cvxpy.problems.objective import Objective
 from cvxpy.reductions.inverse_data import InverseData
 from cvxpy.reductions.reduction import Reduction
 from cvxpy.reductions.solution import Solution
+from cvxpy.utilities.canonical import Canonical
 
 
 class Canonicalization(Reduction):
@@ -71,45 +76,112 @@ class Canonicalization(Reduction):
 
         new_problem = problems.problem.Problem(canon_objective,
                                                canon_constraints)
+        self._cons_id_map = inverse_data.cons_id_map
         return new_problem, inverse_data
 
     def invert(self, solution, inverse_data):
         pvars = {vid: solution.primal_vars[vid] for vid in inverse_data.id_map
                  if vid in solution.primal_vars}
-        dvars = {orig_id: solution.dual_vars[vid]
-                 for orig_id, vid in inverse_data.cons_id_map.items()
-                 if vid in solution.dual_vars}
+        if solution.dual_vars is not None:
+            dvars = {orig_id: solution.dual_vars[vid]
+                     for orig_id, vid in inverse_data.cons_id_map.items()
+                     if vid in solution.dual_vars}
+        else:
+            dvars = None
 
         return Solution(solution.status, solution.opt_val, pvars, dvars,
                         solution.attr)
 
-    def canonicalize_tree(self, expr):
-        """Recursively canonicalize an Expression."""
+    @overload
+    def canonicalize_tree(
+        self, expr: Expression, canonicalize_params: bool = True
+    ) -> tuple[Expression, list[Constraint]]: ...
+    @overload
+    def canonicalize_tree(
+        self, expr: Constraint, canonicalize_params: bool = True
+    ) -> tuple[Constraint, list[Constraint]]: ...
+    @overload
+    def canonicalize_tree(
+        self, expr: Objective, canonicalize_params: bool = True
+    ) -> tuple[Objective, list[Constraint]]: ...
+
+    def canonicalize_tree(
+        self, expr: Canonical, canonicalize_params: bool = True
+    ) -> tuple[Canonical, list[Constraint]]:
+        """Recursively canonicalize an Expression.
+
+        Canonicalizing an Expression yields an Expression, a Constraint yields
+        a Constraint, and an Objective yields an Objective; the overloads above
+        preserve that distinction for callers.
+
+        Args:
+            expr: Expression to canonicalize.
+            canonicalize_params: Should constant subtrees
+                containing parameters be canonicalized?
+
+        Returns:
+            canonicalized expression, constraints
+        """
         # TODO don't copy affine expressions?
         if type(expr) == cvxtypes.partial_problem():
             canon_expr, constrs = self.canonicalize_tree(
-              expr.args[0].objective.expr)
+              expr.args[0].objective.expr, canonicalize_params=canonicalize_params)
             for constr in expr.args[0].constraints:
-                canon_constr, aux_constr = self.canonicalize_tree(constr)
+                canon_constr, aux_constr = self.canonicalize_tree(
+                    constr,
+                    canonicalize_params=canonicalize_params
+                )
                 constrs += [canon_constr] + aux_constr
         else:
             canon_args = []
             constrs = []
             for arg in expr.args:
-                canon_arg, c = self.canonicalize_tree(arg)
+                canon_arg, c = self.canonicalize_tree(
+                    arg,
+                    canonicalize_params=canonicalize_params
+                )
                 canon_args += [canon_arg]
                 constrs += c
-            canon_expr, c = self.canonicalize_expr(expr, canon_args)
+            canon_expr, c = self.canonicalize_expr(
+                expr,
+                canon_args,
+                canonicalize_params=canonicalize_params
+            )
             constrs += c
         return canon_expr, constrs
 
-    def canonicalize_expr(self, expr, args):
-        """Canonicalize an expression, w.r.t. canonicalized arguments."""
-        # Constant trees are collapsed, but parameter trees are preserved.
-        if isinstance(expr, Expression) and (
-                expr.is_constant() and not expr.parameters()):
+    def canonicalize_expr(
+            self,
+            expr: Canonical,
+            args: list[Expression],
+            canonicalize_params: bool = True
+        ) -> tuple[Canonical, list[Constraint]]:
+        """Canonicalize an expression, w.r.t. canonicalized arguments.
+
+        Args:
+            expr: Expression to canonicalize.
+            args: Arguments to the expression.
+            canonicalize_params: Should constant subtrees
+                containing parameters be canonicalized?
+
+        Returns:
+            canonicalized expression, constraints
+        """
+        if isinstance(expr, Expression):
+            # Constant trees are collapsed, but parameter trees are preserved
+            # when canonicalize_params = True. Otherwise parameters
+            # are collapsed as well.
+            canon_with_params = canonicalize_params and expr.parameters()
+            skip_canon = expr.is_constant() and not canon_with_params
+        else:
+            skip_canon = False
+
+        if skip_canon:
             return expr, []
-        elif type(expr) in self.canon_methods:
-            return self.canon_methods[type(expr)](expr, args)
+        if type(expr) in self.canon_methods:
+            kwargs = {}
+            if hasattr(self, 'solver_context'):
+                kwargs['solver_context'] = self.solver_context
+            return self.canon_methods[type(expr)](expr, args, **kwargs)
         else:
             return expr.copy(args), []

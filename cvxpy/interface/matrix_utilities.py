@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 import numbers
+from typing import TypeAlias
 
 import numpy as np
 import scipy.sparse as sp
@@ -24,13 +25,15 @@ from cvxpy.interface import numpy_interface as np_intf
 # A mapping of class to interface.
 INTERFACES = {np.ndarray: np_intf.NDArrayInterface(),
               np.matrix: np_intf.MatrixInterface(),
-              sp.csc_matrix: np_intf.SparseMatrixInterface(),
+              sp.csc_matrix: np_intf.SparseArrayInterface(),
+              sp.csc_array: np_intf.SparseArrayInterface(),
               }
 # Default Numpy interface.
 DEFAULT_NP_INTF = INTERFACES[np.ndarray]
 # Default dense and sparse matrix interfaces.
 DEFAULT_INTF = INTERFACES[np.ndarray]
-DEFAULT_SPARSE_INTF = INTERFACES[sp.csc_matrix]
+DEFAULT_SPARSE_INTF = INTERFACES[sp.csc_array]
+ScalarValue: TypeAlias = numbers.Number | np.generic
 
 
 # Returns the interface for interacting with the target matrix class.
@@ -49,7 +52,7 @@ def get_cvxopt_sparse_intf():
     """Dynamic import of CVXOPT sparse interface.
     """
     import cvxpy.interface.cvxopt_interface.sparse_matrix_interface as smi
-    return smi.SparseMatrixInterface()
+    return smi.SparseArrayInterface()
 
 # Tools for handling CVXOPT matrices.
 
@@ -59,7 +62,7 @@ def sparse2cvxopt(value):
 
     Parameters
     ----------
-    sparse_mat : SciPy sparse matrix
+    value : SciPy sparse matrix
         The matrix to convert.
 
     Returns
@@ -132,7 +135,7 @@ def shape(constant):
         return INTERFACES[constant.__class__].shape(constant)
     # Direct all sparse matrices to CSC interface.
     elif is_sparse(constant):
-        return INTERFACES[sp.csc_matrix].shape(constant)
+        return INTERFACES[sp.csc_array].shape(constant)
     else:
         raise TypeError("%s is not a valid type for a Constant value." % type(constant))
 
@@ -162,7 +165,7 @@ def from_1D_to_2D(constant):
     """Convert 1D Numpy arrays to matrices.
     """
     if isinstance(constant, np.ndarray) and constant.ndim == 1:
-        return np.mat(constant).T
+        return np.asmatrix(constant).T
     else:
         return constant
 
@@ -170,7 +173,7 @@ def from_1D_to_2D(constant):
 def convert(constant, sparse: bool = False, convert_scalars: bool = False):
     """Convert to appropriate type.
     """
-    if isinstance(constant, (list, np.matrix)):
+    if isinstance(constant, (list, np.ndarray, np.matrix)):
         return DEFAULT_INTF.const_to_matrix(constant,
                                             convert_scalars=convert_scalars)
     elif sparse:
@@ -182,7 +185,7 @@ def convert(constant, sparse: bool = False, convert_scalars: bool = False):
 # Get the value of the passed constant, interpreted as a scalar.
 
 
-def scalar_value(constant):
+def scalar_value(constant) -> ScalarValue:
     if isinstance(constant, numbers.Number) or np.isscalar(constant):
         return constant
     elif isinstance(constant, list):
@@ -191,7 +194,7 @@ def scalar_value(constant):
         return INTERFACES[constant.__class__].scalar_value(constant)
     # Direct all sparse matrices to CSC interface.
     elif is_sparse(constant):
-        return INTERFACES[sp.csc_matrix].scalar_value(constant.tocsc())
+        return INTERFACES[sp.csc_array].scalar_value(constant.tocsc())
     else:
         raise TypeError("%s is not a valid type for a Constant value." % type(constant))
 
@@ -214,6 +217,9 @@ def sign(constant):
     if isinstance(constant, numbers.Number):
         max_val = constant
         min_val = constant
+    elif np.size(constant) == 0:
+        # Zero-sized arrays are vacuously nonneg and nonpos.
+        return (True, True)
     elif sp.issparse(constant):
         max_val = constant.max()
         min_val = constant.min()
@@ -264,7 +270,7 @@ def index(constant, key):
         return INTERFACES[constant.__class__].index(constant, key)
     # Use CSC interface for all sparse matrices.
     elif is_sparse(constant):
-        interface = INTERFACES[sp.csc_matrix]
+        interface = INTERFACES[sp.csc_array]
         constant = interface.const_to_matrix(constant)
         return interface.index(constant, key)
 
@@ -275,6 +281,12 @@ def is_hermitian(constant) -> bool:
     complex_type = np.iscomplexobj(constant)
     if complex_type:
         # TODO catch complex symmetric but not Hermitian?
+        #
+        #   Riley opinion: while that would be nice, it would introduce
+        #   tons of complications if we actually tried to support
+        #   complex-valued symmetric matrices. As the term is currently
+        #   used in CVXPY (v 1.2), the term "symmetric" always means
+        #   "real symmetric".
         is_symm = False
         if sp.issparse(constant):
             is_herm = is_sparse_symmetric(constant, complex=True)
@@ -287,6 +299,19 @@ def is_hermitian(constant) -> bool:
             is_symm = np.allclose(constant, constant.T)
         is_herm = is_symm
     return is_symm, is_herm
+
+
+def is_skew_symmetric(constant) -> bool:
+    """Is the """
+    complex_type = np.iscomplexobj(constant)
+    if complex_type:
+        return False
+    else:
+        if sp.issparse(constant):
+            is_skew_symm = is_sparse_skew_symmetric(constant)
+        else:
+            is_skew_symm = np.allclose(constant + constant.T, 0.0)
+        return is_skew_symm
 
 
 def is_sparse_symmetric(m, complex: bool = False) -> bool:
@@ -307,8 +332,9 @@ def is_sparse_symmetric(m, complex: bool = False) -> bool:
     if m.shape[0] != m.shape[1]:
         raise ValueError('m must be a square matrix')
 
-    if not isinstance(m, sp.coo_matrix):
-        m = sp.coo_matrix(m)
+    m = sp.coo_array(m)
+    m.sum_duplicates()
+    m.eliminate_zeros()
 
     r, c, v = m.row, m.col, m.data
     tril_no_diag = r > c
@@ -326,12 +352,64 @@ def is_sparse_symmetric(m, complex: bool = False) -> bool:
 
     sortl = np.lexsort((cl, rl))
     sortu = np.lexsort((ru, cu))
-    vl = vl[sortl]
-    vu = vu[sortu]
+    rl, cl, vl = rl[sortl], cl[sortl], vl[sortl]
+    ru, cu, vu = ru[sortu], cu[sortu], vu[sortu]
+
+    # Entry (i, j) in the lower triangle must mirror entry (j, i)
+    # in the upper triangle.
+    if not (np.array_equal(rl, cu) and np.array_equal(cl, ru)):
+        return False
 
     if complex:
         check = np.allclose(vl, np.conj(vu))
     else:
         check = np.allclose(vl, vu)
 
+    return check
+
+
+def is_sparse_skew_symmetric(A) -> bool:
+    """Check if a real sparse matrix A satisfies A + A.T == 0.
+
+    Parameters
+    ----------
+    A : array or sparse matrix
+        A square matrix.
+
+    Returns
+    -------
+    check : bool
+        The check result.
+    """
+    if A.shape[0] != A.shape[1]:
+        raise ValueError('m must be a square matrix')
+
+    A = sp.coo_array(A)
+    A.sum_duplicates()
+    A.eliminate_zeros()
+
+    r, c, v = A.row, A.col, A.data
+    tril = r >= c
+    triu = c >= r
+
+    if triu.sum() != tril.sum():
+        return False
+
+    rl = r[tril]
+    cl = c[tril]
+    vl = v[tril]
+    ru = r[triu]
+    cu = c[triu]
+    vu = v[triu]
+
+    sortl = np.lexsort((cl, rl))
+    sortu = np.lexsort((ru, cu))
+    rl, cl, vl = rl[sortl], cl[sortl], vl[sortl]
+    ru, cu, vu = ru[sortu], cu[sortu], vu[sortu]
+
+    # Entry (i, j) with i >= j must mirror entry (j, i) with j <= i.
+    if not (np.array_equal(rl, cu) and np.array_equal(cl, ru)):
+        return False
+
+    check = np.allclose(vl + vu, 0)
     return check

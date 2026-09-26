@@ -13,19 +13,33 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-from typing import Optional, Tuple
 
 import numpy as np
 
 from cvxpy.atoms.atom import Atom
 from cvxpy.atoms.axis_atom import AxisAtom
+from cvxpy.expressions import cvxtypes
+from cvxpy.utilities import bounds as bounds_utils
 
 
 class max(AxisAtom):
     """:math:`\\max_{i,j}\\{X_{i,j}\\}`.
     """
 
-    def __init__(self, x, axis: Optional[int] = None, keepdims: bool = False) -> None:
+    __EXPR_AXIS_ERROR__ = """
+
+    The second argument to "max" was a cvxpy Expression, when it should have
+    been an int or None. This is probably a result of calling "cp.max" when you
+    should call "cp.maximum". The difference is that cp.max represents the
+    maximum entry in a single vector or matrix, while cp.maximum represents
+    the entry-wise max of a sequence of arguments that all have the same shape.
+
+    """
+
+    def __init__(self, x, axis: int | tuple[int, ...] | None = None,
+                 keepdims: bool = False) -> None:
+        if isinstance(axis, cvxtypes.expression()):
+            raise ValueError(max.__EXPR_AXIS_ERROR__)
         super(max, self).__init__(x, axis=axis, keepdims=keepdims)
 
     @Atom.numpy_numeric
@@ -65,11 +79,16 @@ class max(AxisAtom):
         D[idx] = 1
         return D
 
-    def sign_from_args(self) -> Tuple[bool, bool]:
+    def sign_from_args(self) -> tuple[bool, bool]:
         """Returns sign (is positive, is negative) of the expression.
         """
         # Same as argument.
         return (self.args[0].is_nonneg(), self.args[0].is_nonpos())
+
+    def bounds_from_args(self) -> tuple[np.ndarray, np.ndarray]:
+        """Returns bounds for max reduction based on argument bounds."""
+        lb, ub = self.args[0].get_bounds()
+        return bounds_utils.max_reduction_bounds(lb, ub, axis=self.axis, keepdims=self.keepdims)
 
     def is_atom_convex(self) -> bool:
         """Is the atom convex?

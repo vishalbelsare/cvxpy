@@ -15,16 +15,20 @@ limitations under the License.
 """
 
 from collections import namedtuple
+from operator import attrgetter
 
 import numpy as np
-from scipy.sparse import dok_matrix
+from scipy.sparse import dok_array
 
 import cvxpy.settings as s
 from cvxpy.constraints import SOC
 from cvxpy.reductions.solution import Solution, failure_solution
 from cvxpy.reductions.solvers import utilities
 from cvxpy.reductions.solvers.conic_solvers.conic_solver import (
-    ConicSolver, dims_to_solver_dict,)
+    ConicSolver,
+    dims_to_solver_dict,
+)
+from cvxpy.utilities.citations import CITATION_DICT
 
 # Values used to distinguish between linear and quadratic constraints.
 _LIN, _QUAD = 0, 1
@@ -37,14 +41,13 @@ _CpxConstr = namedtuple("_CpxConstr", ["constr_type", "index"])
 
 def set_parameters(model, solver_opts) -> None:
     """Sets CPLEX parameters."""
-    # TODO: Parameter support is functional, but perhaps not ideal.
-    # The user must pass parameter names as used in the CPLEX Python
-    # API, and raw values (i.e., no enum support).
     kwargs = sorted(solver_opts.keys())
     if "cplex_params" in kwargs:
         for param, value in solver_opts["cplex_params"].items():
             try:
-                eval("model.parameters.{0}.set({1})".format(param, value))
+                f = attrgetter(param)
+                parameter = f(model.parameters)
+                parameter.set(value)
             except AttributeError:
                 raise ValueError(
                     "invalid CPLEX parameter, value pair ({0}, {1})".format(
@@ -207,7 +210,10 @@ class CPLEX(ConicSolver):
 
     # Solver capabilities.
     MIP_CAPABLE = True
+    BOUNDED_VARIABLES = True
     SUPPORTED_CONSTRAINTS = ConicSolver.SUPPORTED_CONSTRAINTS + [SOC]
+    MI_SUPPORTED_CONSTRAINTS = SUPPORTED_CONSTRAINTS
+    REQUIRED_MODULES = ("cplex",)
 
     def name(self):
         """The name of the solver. """
@@ -215,8 +221,7 @@ class CPLEX(ConicSolver):
 
     def import_solver(self) -> None:
         """Imports the solver."""
-        import cplex
-        cplex  # For flake8
+        import cplex  # noqa F401
 
     def accepts(self, problem) -> bool:
         """Can CPLEX solve the problem?
@@ -287,8 +292,8 @@ class CPLEX(ConicSolver):
 
         c = data[s.C]
         b = data[s.B]
-        A = dok_matrix(data[s.A])
-        # Save the dok_matrix.
+        A = dok_array(data[s.A])
+        # Save the dok_array.
         data[s.A] = A
         dims = dims_to_solver_dict(data[s.DIMS])
 
@@ -314,10 +319,20 @@ class CPLEX(ConicSolver):
             # here, will ensure that the problem type remains an LP.
             pass
         # Add the variables in a batch
+        lb = data[s.LOWER_BOUNDS]
+        ub = data[s.UPPER_BOUNDS]
+        if lb is None:
+            lb = [-cplex.infinity]*n
+        else:
+            lb = [max(v, -cplex.infinity) for v in lb]
+        if ub is None:
+            ub = [cplex.infinity]*n
+        else:
+            ub = [min(v, cplex.infinity) for v in ub]
         variables = list(model.variables.add(
             obj=[c[i] for i in range(n)],
-            lb=[-cplex.infinity]*n,  # default LB is 0
-            ub=[cplex.infinity]*n,
+            lb=lb,
+            ub=ub,
             types="".join(vtype),
             names=["x_%d" % i for i in range(n)]))
 
@@ -408,8 +423,9 @@ class CPLEX(ConicSolver):
         constr, lin_expr, rhs = [], [], []
         csr = mat.tocsr()
         for i in rows:
-            ind = [variables[x] for x in csr[i].indices]
-            val = [x for x in csr[i].data]
+            row = csr[[i], :]
+            ind = [variables[x] for x in row.indices]
+            val = [x for x in row.data]
             lin_expr.append([ind, val])
             rhs.append(vec[i])
         # For better performance, we add the constraints in a batch.
@@ -452,8 +468,9 @@ class CPLEX(ConicSolver):
         lin_expr_list, soc_vars, lin_rhs = [], [], []
         csr = mat.tocsr()
         for i in rows:
-            ind = [variables[x] for x in csr[i].indices]
-            val = [x for x in csr[i].data]
+            row = csr[[i], :]
+            ind = [variables[x] for x in row.indices]
+            val = [x for x in row.data]
             # Ignore empty constraints.
             if ind:
                 lin_expr_list.append((ind, val))
@@ -504,3 +521,13 @@ class CPLEX(ConicSolver):
             rhs=0.0,
             name="")
         return (qconstr, new_lin_constrs, soc_vars)
+
+    def cite(self, data):
+        """Returns bibtex citation for the solver.
+
+        Parameters
+        ----------
+        data : dict
+            Data generated via an apply call.
+        """
+        return CITATION_DICT["CPLEX"]

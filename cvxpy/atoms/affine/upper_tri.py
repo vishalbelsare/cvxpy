@@ -13,34 +13,39 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-from typing import List, Tuple
 
 import numpy as np
-from scipy.sparse import csc_matrix
+import scipy.sparse as sp
 
 import cvxpy.lin_ops.lin_op as lo
 import cvxpy.lin_ops.lin_utils as lu
 from cvxpy.atoms.affine.affine_atom import AffAtom
 from cvxpy.atoms.affine.reshape import reshape
+from cvxpy.atoms.affine.vec import vec
 from cvxpy.constraints.constraint import Constraint
 from cvxpy.expressions.expression import Expression
 
 
 class upper_tri(AffAtom):
-    """The vectorized strictly upper-triagonal entries.
+    """
+    The vectorized strictly upper-triangular entries.
 
     The vectorization is performed by concatenating (partial) rows.
     For example, if
-    ```
-    A = np.array([[10, 11, 12, 13],
-                  [14, 15, 16, 17],
-                  [18, 19, 20, 21],
-                  [22, 23, 24, 25]])
-    ```
+
+    ::
+
+        A = np.array([[10, 11, 12, 13],
+                      [14, 15, 16, 17],
+                      [18, 19, 20, 21],
+                      [22, 23, 24, 25]])
+
     then we have
-    ```
-    upper_tri(A).value == np.array([11, 12, 13, 16, 17, 21])
-    ```
+
+    ::
+
+        upper_tri(A).value == np.array([11, 12, 13, 16, 17, 21])
+
     """
 
     def __init__(self, expr) -> None:
@@ -48,30 +53,30 @@ class upper_tri(AffAtom):
 
     @AffAtom.numpy_numeric
     def numeric(self, values):
-        """Vectorize the upper triagonal entries.
         """
-        value = np.zeros(self.shape[0])
-        count = 0
-        for i in range(values[0].shape[0]):
-            for j in range(values[0].shape[1]):
-                if i < j:
-                    value[count] = values[0][i, j]
-                    count += 1
-        return value
+        Vectorize the strictly upper triangular entries.
+        """
+        n = values[0].shape[-1]
+        rows, cols = np.triu_indices(n, k=1)
+        return values[0][..., rows, cols]
 
     def validate_arguments(self) -> None:
-        """Checks that the argument is a square matrix.
+        """Checks that the argument is a square matrix with ndim >= 2.
         """
-        if not self.args[0].ndim == 2 or self.args[0].shape[0] != self.args[0].shape[1]:
+        shape = self.args[0].shape
+        if len(shape) < 2 or shape[-2] != shape[-1]:
             raise ValueError(
-                "Argument to upper_tri must be a square matrix."
+                "Argument to upper_tri must have ndim >= 2 with equal last two dimensions."
             )
 
-    def shape_from_args(self) -> Tuple[int, int]:
-        """A vector.
+    def shape_from_args(self) -> tuple[int, ...]:
+        """Batch shape + vector of upper triangular entries.
         """
-        rows, cols = self.args[0].shape
-        return (rows*(cols-1)//2, 1)
+        shape = self.args[0].shape
+        n = shape[-1]
+        batch_shape = shape[:-2]
+        tri = n * (n - 1) // 2
+        return batch_shape + (tri, 1)
 
     def is_atom_log_log_convex(self) -> bool:
         """Is the atom log-log convex?
@@ -84,9 +89,9 @@ class upper_tri(AffAtom):
         return True
 
     def graph_implementation(
-        self, arg_objs, shape: Tuple[int, ...], data=None
-    ) -> Tuple[lo.LinOp, List[Constraint]]:
-        """Vectorized strictly upper triagonal entries.
+        self, arg_objs, shape: tuple[int, ...], data=None
+    ) -> tuple[lo.LinOp, list[Constraint]]:
+        """Vectorized strictly upper triangular entries.
 
         Parameters
         ----------
@@ -105,8 +110,19 @@ class upper_tri(AffAtom):
         return (lu.upper_tri(arg_objs[0]), [])
 
 
-def vec_to_upper_tri(expr, strict: bool = False):
-    expr = Expression.cast_to_const(expr)
+def vec_to_upper_tri(expr, strict: bool = False) -> Expression:
+    """Reshapes a vector into an upper triangular matrix in
+    row-major order. The strict argument specifies whether an upper or a strict upper triangular
+    matrix should be returned.
+    Inverts cp.upper_tri.
+    """
+    expr = Expression.cast(expr)
+
+    if not expr.is_vector():
+        raise ValueError("The input must be a vector.")
+    if expr.ndim != 1:
+        expr = vec(expr, order='F')
+
     ell = expr.shape[0]
     if strict:
         # n * (n-1)/2 == ell
@@ -115,25 +131,77 @@ def vec_to_upper_tri(expr, strict: bool = False):
         # n * (n+1)/2 == ell
         n = ((8 * ell + 1) ** 0.5 - 1) // 2
     n = int(n)
-    # form a matrix P, of shape (n**2, ell).
-    #       the i-th block of n rows of P gives the entries of the i-th row
-    #       of the upper-triangular matrix associated with expr.
-    # compute expr2 = P @ expr
-    # compute expr3 = reshape(expr2, shape=(n, n)).T
-    #   expr3 is the matrix formed by reading length-n blocks of expr2,
-    #   and letting each block form a row of expr3.
-    P_rows = []
-    P_row = 0
-    for mat_row in range(n):
-        entries_in_row = n - mat_row
-        if strict:
-            entries_in_row -= 1
-        P_row += n - entries_in_row  # these are zeros
-        P_rows.extend(range(P_row, P_row + entries_in_row))
-        P_row += entries_in_row
+    if not (n * (n + 1) // 2 == ell or n * (n - 1) // 2 == ell):
+        raise ValueError("The size of the vector must be a triangular number.")
+
+    """
+    Initialize a coefficient matrix P that creates an upper triangular matrix when
+    multiplied with a variable vector expr.
+    That is, (P @ expr).reshape((n, n)) is an upper triangular matrix.
+    """
+    k = 1 if strict else 0
+    row_idx, col_idx = np.triu_indices(n, k=k)
+    P_rows = n * row_idx + col_idx
     P_cols = np.arange(ell)
     P_vals = np.ones(P_cols.size)
-    P = csc_matrix((P_vals, (P_rows, P_cols)), shape=(n**2, ell))
-    expr2 = P @ expr
-    expr3 = reshape(expr2, (n, n)).T
-    return expr3
+    P = sp.csc_array((P_vals, (P_rows, P_cols)), shape=(n * n, ell))
+    return reshape(P @ expr, (n, n), order='F').T
+
+
+def upper_tri_to_full(n: int) -> sp.csc_array:
+    """
+    Returns a coefficient matrix A that creates a symmetric matrix when
+    multiplied with a variable vector v.
+    That is, (A @ v).reshape((n, n)) is a symmetric matrix.
+
+    Parameters
+    ----------
+    n : int
+        The length of the matrix.
+
+    Returns
+    -------
+    sp.csc_array
+        The coefficient matrix.
+    """
+    entries = n*(n+1)//2
+
+    # Initialize row and col indices from upper triangular matrix
+    rows, cols = np.triu_indices(n)
+
+    # Mask for the symmetric part when i != j
+    mask = rows != cols
+
+    row_idx = np.concatenate([rows * n + cols, cols[mask] * n + rows[mask]])
+    col_idx = np.concatenate([np.arange(entries), np.arange(entries)[mask]])
+    values = np.ones(col_idx.size, dtype=float)
+
+    # Construct and return the sparse matrix
+    return sp.csc_array((values, (row_idx, col_idx)), shape=(n * n, entries))
+
+
+def batched_upper_tri_to_full(batch_size: int, n: int) -> sp.csc_array:
+    """
+    Returns a coefficient matrix that maps a vector of batch_size * tri entries
+    (F-order layout of (batch_size, tri)) to batch_size * n*n entries
+    (F-order layout of (batch_size, n, n)).
+
+    Uses Kronecker product kron(upper_tri_to_full(n), eye(batch_size)) because
+    F-order reshape interleaves batch elements.
+
+    Parameters
+    ----------
+    batch_size : int
+        The number of batch elements.
+    n : int
+        The dimension of the square matrix.
+
+    Returns
+    -------
+    sp.csc_array
+        The coefficient matrix.
+    """
+    single = upper_tri_to_full(n)
+    if batch_size == 1:
+        return single
+    return sp.csc_array(sp.kron(single, sp.eye(batch_size), format='csc'))

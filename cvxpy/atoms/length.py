@@ -13,10 +13,10 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-from typing import Tuple
 
 import numpy as np
 
+import cvxpy.settings as s
 from cvxpy.atoms.atom import Atom
 
 
@@ -33,14 +33,18 @@ class length(Atom):
     def numeric(self, values) -> int:
         """Returns the length of x.
         """
-        return np.max(np.nonzero(values[0])) + 1
+        outside_tol = np.abs(values[0]) > s.ATOM_EVAL_TOL
+        nz = np.nonzero(outside_tol)
+        if nz[0].size == 0:
+            return 0
+        return np.max(nz) + 1
 
-    def shape_from_args(self) -> Tuple[int, ...]:
+    def shape_from_args(self) -> tuple[int, ...]:
         """Returns the (row, col) shape of the expression.
         """
         return tuple()
 
-    def sign_from_args(self) -> Tuple[bool, bool]:
+    def sign_from_args(self) -> tuple[bool, bool]:
         """Returns sign (is positive, is negative) of the expression.
         """
         # Always nonnegative.
@@ -69,12 +73,12 @@ class length(Atom):
     def is_incr(self, idx) -> bool:
         """Is the composition non-decreasing in argument idx?
         """
-        return False
+        return self.args[idx].is_nonneg()
 
     def is_decr(self, idx) -> bool:
         """Is the composition non-increasing in argument idx?
         """
-        return False
+        return self.args[idx].is_nonpos()
 
-    def _grad(self, values) -> None:
-        return None
+    def _grad(self, values):
+        return [None]

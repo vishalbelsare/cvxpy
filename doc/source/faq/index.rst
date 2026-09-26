@@ -2,11 +2,6 @@
 FAQ
 =====================================
 
-.. contents::
-  :local:
-  :backlinks: none
-  :depth: 1
-
 Where can I get help with CVXPY?
 --------------------------------
 You can post questions about how to use CVXPY on StackOverflow or on the `CVXPY mailing list <https://groups.google.com/forum/#!forum/cvxpy>`_.
@@ -15,7 +10,7 @@ create an issue on the `CVXPY Github issue tracker <https://github.com/cvxpy/cvx
 
 Where can I learn more about convex optimization?
 -------------------------------------------------
-The book `Convex Optimization <http://web.stanford.edu/~boyd/cvxbook/>`_ by Boyd and Vandenberghe is available for free online and has extensive background on convex optimization.
+The book `Convex Optimization <https://web.stanford.edu/~boyd/cvxbook/>`_ by Boyd and Vandenberghe is available for free online and has extensive background on convex optimization.
 To learn more about disciplined convex programming,
 visit the `DCP tutorial website <http://dcp.stanford.edu/>`_.
 
@@ -27,7 +22,7 @@ run the following code snippet in the Python prompt:
 .. code:: python
 
   import cvxpy
-  print cvxpy.__version__
+  print(cvxpy.__version__)
 
 What do I do if I get a ``DCPError`` exception?
 -----------------------------------------------
@@ -47,19 +42,19 @@ What do I do if I get a ``SolverError`` exception?
 Sometimes solvers encounter numerical issues and fail to solve a problem, in which case CVXPY raises a ``SolverError``.
 If this happens to you,
 try using different solvers on your problem,
-as discussed in the "Choosing a solver" section of :ref:`Advanced Features <advanced>`.
+as discussed in the :ref:`Choosing a solver <Choosing a solver>` section.
 If the solver CVXOPT fails, try using the solver option ``kktsolver=ROBUST_KKTSOLVER``.
 
 What solvers does CVXPY support?
 --------------------------------
-See the "Solve method options" section in :ref:`Advanced Features <advanced>` for a list of the solvers CVXPY supports.
+See the :ref:`Solve method options <Solve method options>` section for a list of the solvers CVXPY supports.
 If you would like to use a solver CVXPY does not support,
 make a feature request on the `CVXPY Github issue tracker <https://github.com/cvxpy/cvxpy/issues>`_.
 
 What are the differences between CVXPY's solvers?
 -------------------------------------------------
 The solvers support different classes of problems and occupy different points on the Pareto frontier of speed, accuracy, and open source vs. closed source.
-See the "Solve method options" section in :ref:`Advanced Features <advanced>` for details.
+For more details, please refer to the ":ref:`Solve method options <Solve method options>`" section.
 
 What do I do if I get "Exception: Cannot evaluate the truth value of a constraint"?
 -----------------------------------------------------------------------------------
@@ -81,11 +76,11 @@ Yes, they are fully supported.
 
 How do I constrain a CVXPY matrix expression to be positive semidefinite?
 -------------------------------------------------------------------------
-See :ref:`Advanced Features <advanced>`.
+Please refer to the :ref:`Semidefinite matrices <Semidefinite matrices>` section.
 
 How do I create variables with special properties, such as boolean or symmetric variables?
 ------------------------------------------------------------------------------------------
-See :ref:`Advanced Features <advanced>`.
+Please refer to the :ref:`Attributes <Attributes>` section.
 
 How do I create a variable that has multiple special properties, such as boolean and symmetric?
 -----------------------------------------------------------------------------------------------
@@ -95,6 +90,16 @@ How do I create variables with more than 2 dimensions?
 ------------------------------------------------------
 You must mimic the extra dimensions using a dict,
 as described in `this Github issue <https://github.com/cvxpy/cvxpy/issues/198>`__.
+
+Can I copy CVXPY expressions?
+-----------------------------
+Yes, CVXPY supports shallow and deep copying using the ``copy`` and ``deepcopy`` functions from the ``copy`` module.
+
+A (shallow) copy refers to the same leaf nodes (Variables, Constants, and Parameters) as the original object.
+Non-leaf nodes are recreated. Constraints keep their ``.id`` attribute, as it is used to propagate dual variables.
+
+A deepcopy creates an independent copy of the object while maintaining the relationship between the
+nodes in the expression tree.
 
 Why does it take so long to compile my Problem?
 -----------------------------------------------
@@ -119,6 +124,6 @@ Use the following BibTeX citation:
       title        = {{CVXPY}: A {P}ython-Embedded Modeling Language for Convex Optimization},
       journal      = {Journal of Machine Learning Research},
       note         = {To appear},
-      url          = {http://stanford.edu/~boyd/papers/pdf/cvxpy_paper.pdf},
+      url          = {https://stanford.edu/~boyd/papers/pdf/cvxpy_paper.pdf},
       year         = {2016},
     }

@@ -3,7 +3,9 @@ import numpy as np
 import cvxpy.interface as intf
 import cvxpy.settings as s
 from cvxpy.reductions.solution import Solution, failure_solution
+from cvxpy.reductions.solvers import utilities
 from cvxpy.reductions.solvers.qp_solvers.qp_solver import QpSolver
+from cvxpy.utilities.citations import CITATION_DICT
 
 
 def constrain_gurobi_infty(v) -> None:
@@ -25,28 +27,51 @@ class GUROBI(QpSolver):
     """QP interface for the Gurobi solver"""
 
     MIP_CAPABLE = True
+    BOUNDED_VARIABLES = True
+    REQUIRED_MODULES = ("gurobipy",)
+
+    # Keyword arguments for the CVXPY interface.
+    INTERFACE_ARGS = ["save_file", "reoptimize"]
 
     # Map of Gurobi status to CVXPY status.
     STATUS_MAP = {2: s.OPTIMAL,
                   3: s.INFEASIBLE,
+                  4: s.INFEASIBLE_OR_UNBOUNDED,  # Triggers reoptimize.
                   5: s.UNBOUNDED,
-                  4: s.INFEASIBLE_OR_UNBOUNDED,
-                  6: s.INFEASIBLE,
-                  7: s.SOLVER_ERROR,
-                  8: s.SOLVER_ERROR,
-                  9: s.USER_LIMIT,  # Maximum time expired
-                  # TODO could be anything.
-                  10: s.SOLVER_ERROR,
-                  11: s.SOLVER_ERROR,
-                  12: s.SOLVER_ERROR,
-                  13: s.OPTIMAL_INACCURATE}
+                  6: s.SOLVER_ERROR,
+                  7: s.USER_LIMIT, # ITERATION_LIMIT
+                  8: s.USER_LIMIT, # NODE_LIMIT
+                  9: s.USER_LIMIT,  # TIME_LIMIT
+                  10: s.USER_LIMIT, # SOLUTION_LIMIT
+                  11: s.USER_LIMIT, # INTERRUPTED
+                  12: s.SOLVER_ERROR, # NUMERIC
+                  13: s.USER_LIMIT, # SUBOPTIMAL
+                  14: s.USER_LIMIT, # INPROGRESS
+                  15: s.USER_LIMIT, # USER_OBJ_LIMIT
+                  16: s.USER_LIMIT, # WORK_LIMIT
+                  17: s.USER_LIMIT} # MEM_LIMIT
 
     def name(self):
         return s.GUROBI
 
     def import_solver(self) -> None:
-        import gurobipy
-        gurobipy
+        import gurobipy  # noqa: F401
+
+    def apply(self, problem):
+        """
+        Construct QP problem data stored in a dictionary.
+        The QP has the following form
+
+            minimize      1/2 x' P x + q' x
+            subject to    A x =  b
+                          F x <= g
+
+        """
+        import gurobipy as grb
+        data, inv_data = super(GUROBI, self).apply(problem)
+        # Add initial guess.
+        data['init_value'] = utilities.stack_vals(problem.variables, grb.GRB.UNDEFINED)
+        return data, inv_data
 
     def invert(self, results, inverse_data):
         model = results["model"]
@@ -91,8 +116,21 @@ class GUROBI(QpSolver):
             # Only add duals if not a MIP.
             dual_vars = None
             if not inverse_data[GUROBI.IS_MIP]:
+                # Build dual vars dict keyed by constraint IDs
+                # Gurobi returns duals for [eq_constrs; ineq_constrs]
                 y = -np.array([constraints_grb[i].Pi for i in range(m)])
-                dual_vars = {GUROBI.DUAL_VAR_ID: y}
+                n_eq = inverse_data[self.DIMS].zero
+                eq_dual = utilities.get_dual_values(
+                    y[:n_eq],
+                    utilities.extract_dual_value,
+                    inverse_data[self.EQ_CONSTR])
+                ineq_dual = utilities.get_dual_values(
+                    y[n_eq:],
+                    utilities.extract_dual_value,
+                    inverse_data[self.NEQ_CONSTR])
+                dual_vars = {}
+                dual_vars.update(eq_dual)
+                dual_vars.update(ineq_dual)
 
             sol = Solution(status, opt_val, primal_vars, dual_vars, attr)
         else:
@@ -110,6 +148,14 @@ class GUROBI(QpSolver):
         F = data[s.F].tocsr()       # Convert F matrix to csr format
         g = data[s.G]
         n = data['n_var']
+        lb = data[s.LOWER_BOUNDS]
+        ub = data[s.UPPER_BOUNDS]
+
+        if lb is None:
+            lb = np.full(n, -grb.GRB.INFINITY)
+        if ub is None:
+            ub = np.full(n, grb.GRB.INFINITY)
+
 
         # Constrain values between bounds
         constrain_gurobi_infty(b)
@@ -130,18 +176,12 @@ class GUROBI(QpSolver):
         model.setParam("OutputFlag", verbose)
 
         # Add variables
-        vtypes = {}
+        vtypes = [grb.GRB.CONTINUOUS] * n
         for ind in data[s.BOOL_IDX]:
             vtypes[ind] = grb.GRB.BINARY
         for ind in data[s.INT_IDX]:
             vtypes[ind] = grb.GRB.INTEGER
-        for i in range(n):
-            if i not in vtypes:
-                vtypes[i] = grb.GRB.CONTINUOUS
-        x_grb = model.addVars(int(n),
-                              ub={i: grb.GRB.INFINITY for i in range(n)},
-                              lb={i: -grb.GRB.INFINITY for i in range(n)},
-                              vtype=vtypes)
+        x_grb = model.addVars(n, ub=ub, lb=lb, vtype=vtypes)
 
         if warm_start and solver_cache is not None \
                 and self.name() in solver_cache:
@@ -152,90 +192,43 @@ class GUROBI(QpSolver):
                 old_x_grb = old_model.getVars()
                 for idx in range(len(x_grb)):
                     x_grb[idx].start = old_x_grb[idx].X
-        model.update()
-
-        x = np.array(model.getVars(), copy=False)
+        elif warm_start:
+            # Set the start value of Gurobi vars to user provided values.
+            for idx in range(len(x_grb)):
+                x_grb[idx].start = data['init_value'][idx]
 
         if A.shape[0] > 0:
-            if hasattr(model, 'addMConstrs'):
-                # We can pass all of A @ x == b at once, use stable API
-                # introduced with Gurobi v9
-                model.addMConstrs(A, None, grb.GRB.EQUAL, b)
-            elif hasattr(model, '_v811_addMConstrs'):
-                # We can pass all of A @ x == b at once, API only for Gurobi
-                # v811
-                A.eliminate_zeros()  # Work around bug in gurobipy v811
-                sense = np.repeat(grb.GRB.EQUAL, A.shape[0])
-                model._v811_addMConstrs(A, sense, b)
-            else:
-                # Add equality constraints: iterate over the rows of A
-                # adding each row into the model
-                for i in range(A.shape[0]):
-                    start = A.indptr[i]
-                    end = A.indptr[i+1]
-                    variables = x[A.indices[start:end]]
-                    coeff = A.data[start:end]
-                    expr = grb.LinExpr(coeff, variables)
-                    model.addConstr(expr, grb.GRB.EQUAL, b[i])
-        model.update()
+            # We can pass all of A @ x == b at once, use stable API
+            # introduced with Gurobi v9.5
+            model.addMConstr(A, None, grb.GRB.EQUAL, b)
 
         if F.shape[0] > 0:
-            if hasattr(model, 'addMConstrs'):
-                # We can pass all of F @ x <= g at once, use stable API
-                # introduced with Gurobi v9
-                model.addMConstrs(F, None, grb.GRB.LESS_EQUAL, g)
-            elif hasattr(model, '_v811_addMConstrs'):
-                # We can pass all of F @ x <= g at once, API only for Gurobi
-                # v811.
-                F.eliminate_zeros()  # Work around bug in gurobipy v811
-                sense = np.repeat(grb.GRB.LESS_EQUAL, F.shape[0])
-                model._v811_addMConstrs(F, sense, g)
-            else:
-                # Add inequality constraints: iterate over the rows of F
-                # adding each row into the model
-                for i in range(F.shape[0]):
-                    start = F.indptr[i]
-                    end = F.indptr[i+1]
-                    variables = x[F.indices[start:end]]
-                    coeff = F.data[start:end]
-                    expr = grb.LinExpr(coeff, variables)
-                    model.addConstr(expr, grb.GRB.LESS_EQUAL, g[i])
-        model.update()
+            # We can pass all of F @ x <= g at once, use stable API
+            # introduced with Gurobi v9.5
+            model.addMConstr(F, None, grb.GRB.LESS_EQUAL, g)
 
         # Define objective
-        if hasattr(model, 'setMObjective'):
-            # Use stable API starting in Gurobi v9
-            P = P.tocoo()
-            model.setMObjective(0.5 * P, q, 0.0)
-        elif hasattr(model, '_v811_setMObjective'):
-            # Use temporary API for Gurobi v811 only
-            P = P.tocoo()
-            model._v811_setMObjective(0.5 * P, q)
-        else:
-            obj = grb.QuadExpr()
-            if P.count_nonzero():  # If there are any nonzero elms in P
-                P = P.tocoo()
-                obj.addTerms(0.5*P.data, vars=list(x[P.row]),
-                             vars2=list(x[P.col]))
-            obj.add(grb.LinExpr(q, x))  # Add linear part
-            model.setObjective(obj)  # Set objective
-        model.update()
+        # Use stable API starting in Gurobi v9
+        P = P.tocoo()
+        model.setMObjective(0.5 * P, q, 0.0)
 
         # Set parameters
         model.setParam("QCPDual", True)
         for key, value in solver_opts.items():
-            model.setParam(key, value)
+            # Ignore arguments unique to the CVXPY interface.
+            if key not in self.INTERFACE_ARGS:
+                model.setParam(key, value)
 
-        # Update model
-        model.update()
+        if 'save_file' in solver_opts:
+            model.write(solver_opts['save_file'])
 
         # Solve problem
         results_dict = {}
         try:
             # Solve
             model.optimize()
-            if model.Status == 4 and solver_opts.get('reoptimize', False):
-                # INF_OR_UNBD. Solve again to get a definitive answer.
+            if model.Status == grb.GRB.INF_OR_UNBD and solver_opts.get('reoptimize', False):
+                # Solve again to get a definitive answer.
                 model.setParam("DualReductions", 0)
                 model.optimize()
         except Exception:  # Error in the solution
@@ -247,3 +240,13 @@ class GUROBI(QpSolver):
             solver_cache[self.name()] = model
 
         return results_dict
+
+    def cite(self, data):
+        """Returns bibtex citation for the solver.
+
+        Parameters
+        ----------
+        data : dict
+            Data generated via an apply call.
+        """
+        return CITATION_DICT["GUROBI"]

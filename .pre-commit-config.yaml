@@ -1,14 +1,27 @@
 repos:
-  # import sorting with isort
-  - repo: https://github.com/pycqa/isort
-    rev: 5.8.0
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Ruff version.
+    rev: 'v0.8.1'
     hooks:
-      - id: isort
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
 
-  # linting and code analysis with flake8
-  - repo: https://github.com/pycqa/flake8
-    rev: 3.8.3
+  - repo: https://github.com/python-jsonschema/check-jsonschema
+    rev: 0.31.0
     hooks:
-      - id: flake8
-        args: ['--config=setup.cfg']
-        files: cvxpy/
+      - id: check-dependabot
+        args: ["--verbose"]
+      - id: check-github-workflows
+        args: ["--verbose"]
+
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.6
+    hooks:
+      - id: actionlint
+        args: [-ignore, SC]
+
+  - repo: https://github.com/abravalheri/validate-pyproject
+    rev: v0.23
+    hooks:
+      - id: validate-pyproject
+

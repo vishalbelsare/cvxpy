@@ -17,8 +17,9 @@ limitations under the License.
 import math
 
 import numpy as np
+import pytest
 
-import cvxpy as cvx
+import cvxpy as cp
 from cvxpy.tests.base_test import BaseTest
 
 
@@ -26,49 +27,49 @@ class TestNonlinearAtoms(BaseTest):
     """ Unit tests for the nonlinear atoms module. """
 
     def setUp(self) -> None:
-        self.x = cvx.Variable(2, name='x')
-        self.y = cvx.Variable(2, name='y')
+        self.x = cp.Variable(2, name='x')
+        self.y = cp.Variable(2, name='y')
 
-        self.A = cvx.Variable((2, 2), name='A')
-        self.B = cvx.Variable((2, 2), name='B')
-        self.C = cvx.Variable((3, 2), name='C')
+        self.A = cp.Variable((2, 2), name='A')
+        self.B = cp.Variable((2, 2), name='B')
+        self.C = cp.Variable((3, 2), name='C')
 
     def test_log_problem(self) -> None:
         # Log in objective.
-        obj = cvx.Maximize(cvx.sum(cvx.log(self.x)))
+        obj = cp.Maximize(cp.sum(cp.log(self.x)))
         constr = [self.x <= [1, math.e]]
-        p = cvx.Problem(obj, constr)
-        result = p.solve(solver=cvx.ECOS)
+        p = cp.Problem(obj, constr)
+        result = p.solve(solver=cp.CLARABEL)
         self.assertAlmostEqual(result, 1)
         self.assertItemsAlmostEqual(self.x.value, [1, math.e])
 
         # Log in constraint.
-        obj = cvx.Minimize(cvx.sum(self.x))
-        constr = [cvx.log(self.x) >= 0, self.x <= [1, 1]]
-        p = cvx.Problem(obj, constr)
-        result = p.solve(solver=cvx.ECOS)
+        obj = cp.Minimize(cp.sum(self.x))
+        constr = [cp.log(self.x) >= 0, self.x <= [1, 1]]
+        p = cp.Problem(obj, constr)
+        result = p.solve(solver=cp.CLARABEL)
         self.assertAlmostEqual(result, 2)
         self.assertItemsAlmostEqual(self.x.value, [1, 1])
 
         # Index into log.
-        obj = cvx.Maximize(cvx.log(self.x)[1])
+        obj = cp.Maximize(cp.log(self.x)[1])
         constr = [self.x <= [1, math.e]]
-        p = cvx.Problem(obj, constr)
-        result = p.solve(solver=cvx.ECOS)
+        p = cp.Problem(obj, constr)
+        result = p.solve(solver=cp.CLARABEL)
         self.assertAlmostEqual(result, 1)
 
         # Scalar log.
-        obj = cvx.Maximize(cvx.log(self.x[1]))
+        obj = cp.Maximize(cp.log(self.x[1]))
         constr = [self.x <= [1, math.e]]
-        p = cvx.Problem(obj, constr)
-        result = p.solve(solver=cvx.ECOS)
+        p = cp.Problem(obj, constr)
+        result = p.solve(solver=cp.CLARABEL)
         self.assertAlmostEqual(result, 1)
 
     def test_entr(self) -> None:
         """Test the entr atom.
         """
-        self.assertEqual(cvx.entr(0).value, 0)
-        assert np.isneginf(cvx.entr(-1).value)
+        self.assertEqual(cp.entr(0).value, 0)
+        assert np.isneginf(cp.entr(-1).value)
 
     def test_kl_div(self) -> None:
         """Test a problem with kl_div.
@@ -82,18 +83,18 @@ class TestNonlinearAtoms(BaseTest):
         npSPriors = npSPriors / sum(npSPriors)
 
         # Reference distribution
-        p_refProb = cvx.Parameter(kK, nonneg=True)
+        p_refProb = cp.Parameter(kK, nonneg=True)
         # Distribution to be estimated
-        v_prob = cvx.Variable(kK)
-        objkl = cvx.sum(cvx.kl_div(v_prob, p_refProb))
+        v_prob = cp.Variable(kK)
+        objkl = cp.sum(cp.kl_div(v_prob, p_refProb))
 
-        constrs = [cvx.sum(v_prob) == 1]
-        klprob = cvx.Problem(cvx.Minimize(objkl), constrs)
+        constrs = [cp.sum(v_prob) == 1]
+        klprob = cp.Problem(cp.Minimize(objkl), constrs)
         p_refProb.value = npSPriors
-        klprob.solve(solver=cvx.SCS, verbose=True)
+        klprob.solve(solver=cp.SCS)
         self.assertItemsAlmostEqual(v_prob.value, npSPriors, places=3)
-        klprob.solve(solver=cvx.ECOS, verbose=True)
-        self.assertItemsAlmostEqual(v_prob.value, npSPriors)
+        klprob.solve(solver=cp.CLARABEL)
+        self.assertItemsAlmostEqual(v_prob.value, npSPriors, places=3)
 
     def test_rel_entr(self) -> None:
         """Test a problem with rel_entr.
@@ -107,32 +108,32 @@ class TestNonlinearAtoms(BaseTest):
         npSPriors = npSPriors / sum(npSPriors)
 
         # Reference distribution
-        p_refProb = cvx.Parameter(kK, nonneg=True)
+        p_refProb = cp.Parameter(kK, nonneg=True)
         # Distribution to be estimated
-        v_prob = cvx.Variable(kK)
-        obj_rel_entr = cvx.sum(cvx.rel_entr(v_prob, p_refProb))
+        v_prob = cp.Variable(kK)
+        obj_rel_entr = cp.sum(cp.rel_entr(v_prob, p_refProb))
 
-        constrs = [cvx.sum(v_prob) == 1]
-        rel_entr_prob = cvx.Problem(cvx.Minimize(obj_rel_entr), constrs)
+        constrs = [cp.sum(v_prob) == 1]
+        rel_entr_prob = cp.Problem(cp.Minimize(obj_rel_entr), constrs)
         p_refProb.value = npSPriors
-        rel_entr_prob.solve(solver=cvx.SCS, verbose=True)
+        rel_entr_prob.solve(solver=cp.SCS)
         self.assertItemsAlmostEqual(v_prob.value, npSPriors, places=3)
-        rel_entr_prob.solve(solver=cvx.ECOS, verbose=True)
-        self.assertItemsAlmostEqual(v_prob.value, npSPriors)
+        rel_entr_prob.solve(solver=cp.CLARABEL)
+        self.assertItemsAlmostEqual(v_prob.value, npSPriors, places=3)
 
     def test_difference_kl_div_rel_entr(self) -> None:
         """A test showing the difference between kl_div and rel_entr
         """
-        x = cvx.Variable()
-        y = cvx.Variable()
+        x = cp.Variable()
+        y = cp.Variable()
 
-        kl_div_prob = cvx.Problem(cvx.Minimize(cvx.kl_div(x, y)), constraints=[x + y <= 1])
-        kl_div_prob.solve(solver=cvx.ECOS)
-        self.assertItemsAlmostEqual(x.value, y.value)
+        kl_div_prob = cp.Problem(cp.Minimize(cp.kl_div(x, y)), constraints=[x + y <= 1])
+        kl_div_prob.solve(solver=cp.CLARABEL)
+        self.assertItemsAlmostEqual(x.value, y.value, places=3)
         self.assertItemsAlmostEqual(kl_div_prob.value, 0)
 
-        rel_entr_prob = cvx.Problem(cvx.Minimize(cvx.rel_entr(x, y)), constraints=[x + y <= 1])
-        rel_entr_prob.solve(solver=cvx.ECOS)
+        rel_entr_prob = cp.Problem(cp.Minimize(cp.rel_entr(x, y)), constraints=[x + y <= 1])
+        rel_entr_prob.solve(solver=cp.CLARABEL)
 
         """
         Reference solution computed by passing the following command to Wolfram Alpha:
@@ -146,37 +147,86 @@ class TestNonlinearAtoms(BaseTest):
         """Test a problem with entr.
         """
         for n in [5, 10, 25]:
-            print(n)
-            x = cvx.Variable(n)
-            obj = cvx.Maximize(cvx.sum(cvx.entr(x)))
-            p = cvx.Problem(obj, [cvx.sum(x) == 1])
-            p.solve(solver=cvx.ECOS, verbose=True)
-            self.assertItemsAlmostEqual(x.value, n*[1./n])
-            p.solve(solver=cvx.SCS, verbose=True)
+            x = cp.Variable(n)
+            obj = cp.Maximize(cp.sum(cp.entr(x)))
+            p = cp.Problem(obj, [cp.sum(x) == 1])
+            p.solve(solver=cp.CLARABEL)
+            self.assertItemsAlmostEqual(x.value, n*[1./n], places=3)
+            p.solve(solver=cp.SCS)
             self.assertItemsAlmostEqual(x.value, n*[1./n], places=3)
 
     def test_exp(self) -> None:
         """Test a problem with exp.
         """
         for n in [5, 10, 25]:
-            print(n)
-            x = cvx.Variable(n)
-            obj = cvx.Minimize(cvx.sum(cvx.exp(x)))
-            p = cvx.Problem(obj, [cvx.sum(x) == 1])
-            p.solve(solver=cvx.SCS, verbose=True)
+            x = cp.Variable(n)
+            obj = cp.Minimize(cp.sum(cp.exp(x)))
+            p = cp.Problem(obj, [cp.sum(x) == 1])
+            p.solve(solver=cp.SCS)
             self.assertItemsAlmostEqual(x.value, n*[1./n], places=3)
-            p.solve(solver=cvx.ECOS, verbose=True)
-            self.assertItemsAlmostEqual(x.value, n*[1./n])
+            p.solve(solver=cp.CLARABEL)
+            self.assertItemsAlmostEqual(x.value, n*[1./n], places=4)
 
     def test_log(self) -> None:
         """Test a problem with log.
         """
         for n in [5, 10, 25]:
-            print(n)
-            x = cvx.Variable(n)
-            obj = cvx.Maximize(cvx.sum(cvx.log(x)))
-            p = cvx.Problem(obj, [cvx.sum(x) == 1])
-            p.solve(solver=cvx.ECOS, verbose=True)
+            x = cp.Variable(n)
+            obj = cp.Maximize(cp.sum(cp.log(x)))
+            p = cp.Problem(obj, [cp.sum(x) == 1])
+            p.solve(solver=cp.CLARABEL)
             self.assertItemsAlmostEqual(x.value, n*[1./n])
-            p.solve(solver=cvx.SCS, verbose=True)
+            p.solve(solver=cp.SCS)
             self.assertItemsAlmostEqual(x.value, n*[1./n], places=2)
+
+
+@pytest.mark.parametrize(
+    ("atom", "numeric", "grad", "domain_size"),
+    [
+        (cp.nlp.sin, np.sin, np.cos, 0),
+        (cp.nlp.cos, np.cos, lambda x: -np.sin(x), 0),
+        (cp.nlp.tan, np.tan, lambda x: 1 / np.cos(x) ** 2, 2),
+    ],
+)
+def test_trig_atoms_metadata_numeric_and_grad(atom, numeric, grad, domain_size):
+    x = cp.Variable(2)
+    expr = atom(x)
+    value = np.array([0.2, -0.3])
+
+    np.testing.assert_allclose(expr.numeric([value]), numeric(value))
+    assert expr.sign_from_args() == (False, False)
+    assert not expr.is_atom_convex()
+    assert not expr.is_atom_concave()
+    assert expr.is_atom_smooth()
+    assert not expr.is_incr(0)
+    assert not expr.is_decr(0)
+    assert len(expr._domain()) == domain_size
+
+    grad_matrix = expr._grad([value])[0]
+    np.testing.assert_allclose(grad_matrix.diagonal(), grad(value))
+
+
+@pytest.mark.parametrize(
+    ("atom", "numeric", "domain_size"),
+    [
+        (cp.nlp.sinh, np.sinh, 0),
+        (cp.nlp.tanh, np.tanh, 0),
+        (cp.nlp.asinh, np.arcsinh, 0),
+        (cp.nlp.atanh, np.arctanh, 2),
+    ],
+)
+def test_hyperbolic_atoms_metadata_numeric_and_unimplemented_grad(atom, numeric, domain_size):
+    x = cp.Variable(2)
+    expr = atom(x)
+    value = np.array([0.2, -0.3])
+
+    np.testing.assert_allclose(expr.numeric([value]), numeric(value))
+    assert expr.sign_from_args() == (False, False)
+    assert not expr.is_atom_convex()
+    assert not expr.is_atom_concave()
+    assert expr.is_atom_smooth()
+    assert expr.is_incr(0)
+    assert not expr.is_decr(0)
+    assert len(expr._domain()) == domain_size
+    with pytest.raises(NotImplementedError):
+        expr._grad([value])

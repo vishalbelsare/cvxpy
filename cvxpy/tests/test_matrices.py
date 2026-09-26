@@ -13,9 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-import sys
 import unittest
-from typing import Tuple
 
 import numpy
 import scipy.sparse as sp
@@ -25,13 +23,11 @@ from cvxpy.constraints.constraint import Constraint
 from cvxpy.expressions.expression import Expression
 from cvxpy.expressions.variable import Variable
 
-PY35 = sys.version_info >= (3, 5)
-
 
 class TestMatrices(unittest.TestCase):
     """ Unit tests for testing different forms of matrices as constants. """
 
-    def assertExpression(self, expr, shape: Tuple[int, ...]) -> None:
+    def assertExpression(self, expr, shape: tuple[int, ...]) -> None:
         """Asserts that expr is an Expression with dimension shape.
         """
         assert isinstance(expr, Expression) or isinstance(expr, Constraint)
@@ -111,8 +107,8 @@ class TestMatrices(unittest.TestCase):
         """Test scipy sparse matrices."""
         # Constants.
         A = numpy.arange(8).reshape((4, 2))
-        A = sp.csc_matrix(A)
-        A = sp.eye(2).tocsc()
+        A = sp.csc_array(A)
+        A = sp.eye_array(2, format='csc')
         key = (slice(0, 1, None), slice(None, None, None))
         Aidx = intf.index(A, (slice(0, 2, None), slice(None, None, None)))
         Aidx = intf.index(Aidx, key)
@@ -123,15 +119,14 @@ class TestMatrices(unittest.TestCase):
         # Linear ops.
         var = Variable((4, 2))
         A = numpy.arange(8).reshape((4, 2))
-        A = sp.csc_matrix(A)
+        A = sp.csc_array(A)
         B = sp.hstack([A, A])
         self.assertExpression(var + A, (4, 2))
         self.assertExpression(A + var, (4, 2))
         self.assertExpression(B @ var, (4, 2))
         self.assertExpression(var - A, (4, 2))
         self.assertExpression(A - A - var, (4, 2))
-        if PY35:
-            self.assertExpression(var.__rmatmul__(B), (4, 2))
+        self.assertExpression(var.__rmatmul__(B), (4, 2))
         # self.assertExpression(var <= A, (4, 2))
         # self.assertExpression(A <= var, (4, 2))
         # self.assertExpression(var == A, (4, 2))

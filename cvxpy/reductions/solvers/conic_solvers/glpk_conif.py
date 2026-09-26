@@ -18,6 +18,7 @@ import cvxpy.interface as intf
 import cvxpy.settings as s
 from cvxpy.reductions.solvers.conic_solvers.conic_solver import ConicSolver
 from cvxpy.reductions.solvers.conic_solvers.cvxopt_conif import CVXOPT
+from cvxpy.utilities.citations import CITATION_DICT
 
 
 class GLPK(CVXOPT):
@@ -26,6 +27,10 @@ class GLPK(CVXOPT):
     # Solver capabilities.
     MIP_CAPABLE = False
     SUPPORTED_CONSTRAINTS = ConicSolver.SUPPORTED_CONSTRAINTS
+    REQUIRED_MODULES = ("cvxopt.glpk",)
+
+    # When constraints aren't provided, use zero matrix and vector of this length
+    MIN_CONSTRAINT_LENGTH = 1
 
     def name(self):
         """The name of the solver.
@@ -35,30 +40,7 @@ class GLPK(CVXOPT):
     def import_solver(self) -> None:
         """Imports the solver.
         """
-        from cvxopt import glpk
-        glpk  # For flake8
-
-    def apply(self, problem):
-        """Returns a new problem and data for inverting the new solution.
-
-        Returns
-        -------
-        tuple
-            (dict of arguments needed for the solver, inverse data)
-        """
-        data, inv_data = super(GLPK, self).apply(problem)
-        # Convert A, b, G, h, c to CVXOPT matrices.
-        if data[s.A] is not None:
-            data[s.A] = intf.sparse2cvxopt(data[s.A])
-        if data[s.G] is not None:
-            data[s.G] = intf.sparse2cvxopt(data[s.G])
-        if data[s.B] is not None:
-            data[s.B] = intf.dense2cvxopt(data[s.B])
-        if data[s.H] is not None:
-            data[s.H] = intf.dense2cvxopt(data[s.H])
-        if data[s.C] is not None:
-            data[s.C] = intf.dense2cvxopt(data[s.C])
-        return data, inv_data
+        from cvxopt import glpk  # noqa F401
 
     def invert(self, solution, inverse_data):
         """Returns the solution to the original problem given the inverse_data.
@@ -74,7 +56,12 @@ class GLPK(CVXOPT):
         if verbose:
             cvxopt.solvers.options["msg_lev"] = "GLP_MSG_ON"
         else:
-            cvxopt.solvers.options["msg_lev"] = "GLP_MSG_OFF"
+            if "glpk" in solver_opts:
+                solver_opts["glpk"]["msg_lev"] = "GLP_MSG_OFF"
+            else:
+                solver_opts["glpk"] = {"msg_lev": "GLP_MSG_OFF"}
+
+        data = self._prepare_cvxopt_matrices(data)
 
         # Apply any user-specific options.
         # Rename max_iters to maxiters.
@@ -121,3 +108,13 @@ class GLPK(CVXOPT):
                 cvxopt.solvers.options[key] = old_options[key]
             else:
                 del cvxopt.solvers.options[key]
+
+    def cite(self, data):
+        """Returns bibtex citation for the solver.
+
+        Parameters
+        ----------
+        data : dict
+            Data generated via an apply call.
+        """
+        return CITATION_DICT["GLPK"]

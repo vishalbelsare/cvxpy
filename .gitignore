@@ -56,3 +56,16 @@ env_*
 venv/
 pip-wheel-metadata/
 tags
+
+# Things specific to this project
+cvxpy/_version.py
+
+# Hypothesis testing
+.hypothesis/
+.aider*
+
+# Claude Code
+.claude/
+
+# uv
+uv.lock

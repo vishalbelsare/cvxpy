@@ -19,18 +19,22 @@ import numpy as np
 # Only need Variable from expressions, but that would create a circular import.
 from cvxpy.constraints.constraint import Constraint
 from cvxpy.utilities import scopes
+from cvxpy.utilities.warn import CvxpyDeprecationWarning, warn
 
 
 class NonPos(Constraint):
-    """A constraint of the form :math:`x \\leq 0`.
+    """An inequality constraint of the form :math:`x \\leq 0`.
 
-    The preferred way of creating a ``NonPos`` constraint is through
-    operator overloading. To constrain an expression ``x`` to be non-positive,
-    simply write ``x <= 0``; to constrain ``x`` to be non-negative, write
-    ``x >= 0``. The former creates a ``NonPos`` constraint with ``x``
-    as its argument, while the latter creates one with ``-x`` as its argument.
-    Strict inequalities are not supported, as they do not make sense in a
-    numerical setting.
+    The preferred way of creating an inequality constraint is through
+    operator overloading. To constrain an expression ``x`` to be nonpositive,
+    write ``x <= 0``; to constrain ``x`` to be nonnegative, write ``x >= 0``.
+
+    Dual variables associated with this constraint are nonnegative, rather
+    than nonpositive. As such, dual variables to this constraint belong to the
+    polar cone rather than the dual cone.
+
+    Note: strict inequalities are not supported, as they do not make sense in
+    a numerical setting.
 
     Parameters
     ----------
@@ -39,18 +43,36 @@ class NonPos(Constraint):
     constr_id : int
         A unique id for the constraint.
     """
+
+    DEPRECATION_MESSAGE = """
+    Explicitly invoking "NonPos(expr)" to a create a constraint is deprecated.
+    Please use operator overloading or "NonNeg(-expr)" instead.
+
+    Sign conventions on dual variables associated with NonPos constraints may
+    change in the future.
+    """
     def __init__(self, expr, constr_id=None) -> None:
+        warn(NonPos.DEPRECATION_MESSAGE, CvxpyDeprecationWarning)
         super(NonPos, self).__init__([expr], constr_id)
+        if not self.args[0].is_real():
+            raise ValueError("Input to NonPos must be real.")
 
     def name(self) -> str:
         return "%s <= 0" % self.args[0]
 
     def is_dcp(self, dpp: bool = False) -> bool:
-        """A non-positive constraint is DCP if its argument is convex."""
+        """A NonPos constraint is DCP if its argument is convex."""
         if dpp:
             with scopes.dpp_scope():
                 return self.args[0].is_convex()
         return self.args[0].is_convex()
+
+    def is_dnlp(self) -> bool:
+        """
+        A NonPos constraint is DNLP if its
+        argument is linearizable convex.
+        """
+        return self.args[0].is_linearizable_convex()
 
     def is_dgp(self, dpp: bool = False) -> bool:
         return False
@@ -68,28 +90,31 @@ class NonPos(Constraint):
         """
         if self.expr.value is None:
             return None
-        return np.maximum(self.expr.value, 0)
+        return -np.maximum(self.expr.value, 0)
 
-    def violation(self):
-        res = self.residual
-        if res is None:
-            raise ValueError("Cannot compute the violation of an constraint "
-                             "whose expression is None-valued.")
-        viol = np.linalg.norm(res, ord=2)
-        return viol
+    @property
+    def dual_residual(self):
+        """Residual for CVXPY's stored dual variable sign convention.
+
+        ``NonPos`` stores nonnegative dual variables, matching the multiplier
+        convention used by inequality constraints in CVXPY. The residual is
+        the projection onto the nonnegative orthant minus the stored value.
+        """
+        dv = self.dual_variables[0].value
+        if dv is None:
+            return None
+        return -np.minimum(dv, 0.0)
 
 
 class NonNeg(Constraint):
     """A constraint of the form :math:`x \\geq 0`.
 
-    This class was created to account for the fact that the
-    ConicSolver interface returns matrix data stated with respect
-    to the nonnegative orthant, rather than the nonpositive orthant.
+    The preferred way of creating an inequality constraint is through
+    operator overloading. To constrain an expression ``x`` to be nonnegative,
+    write ``x >= 0``; to constrain ``x`` to be nonpositive, write ``x <= 0``.
 
-    This class can be removed if the behavior of ConicSolver is
-    changed. However the current behavior of ConicSolver means
-    CVXPY's dual variable and Lagrangian convention follows the
-    most common convention in the literature.
+    Dual variables for these constraints are nonnegative. As such, they
+    actually belong to this constraint class' corresponding dual cone.
 
     Parameters
     ----------
@@ -100,9 +125,11 @@ class NonNeg(Constraint):
     """
     def __init__(self, expr, constr_id=None) -> None:
         super(NonNeg, self).__init__([expr], constr_id)
+        if not self.args[0].is_real():
+            raise ValueError("Input to NonNeg must be real.")
 
     def name(self) -> str:
-        return "0 <= %s" % self.args[0]
+        return "%s >= 0" % self.args[0]
 
     def is_dcp(self, dpp: bool = False) -> bool:
         """A non-negative constraint is DCP if its argument is concave."""
@@ -110,6 +137,13 @@ class NonNeg(Constraint):
             with scopes.dpp_scope():
                 return self.args[0].is_concave()
         return self.args[0].is_concave()
+
+    def is_dnlp(self) -> bool:
+        """
+        A non-negative constraint is DNLP if
+        its argument is linearizable concave.
+        """
+        return self.args[0].is_linearizable_concave()
 
     def is_dgp(self, dpp: bool = False) -> bool:
         return False
@@ -127,19 +161,29 @@ class NonNeg(Constraint):
         """
         if self.expr.value is None:
             return None
-        return np.abs(np.minimum(self.expr.value, 0))
+        return -np.minimum(self.expr.value, 0)
 
-    def violation(self):
-        res = self.residual
-        if res is None:
-            raise ValueError("Cannot compute the violation of an constraint "
-                             "whose expression is None-valued.")
-        viol = np.linalg.norm(res, ord=2)
-        return viol
+    @property
+    def dual_residual(self):
+        dv = self.dual_variables[0].value
+        if dv is None:
+            return None
+        return -np.minimum(dv, 0.0)
 
 
 class Inequality(Constraint):
     """A constraint of the form :math:`x \\leq y`.
+
+    Dual variables to these constraints are always nonnegative.
+    A constraint of this type affects the Lagrangian :math:`L` of a
+    minimization problem by
+
+        :math:`L += (x - y)^{T}(\\texttt{con.dual\\_value})`.
+
+    The preferred way of creating one of these constraints is via
+    operator overloading. The expression ``x <= y`` evaluates to
+    ``Inequality(x, y)``, and the expression ``x >= y`` evaluates
+    to ``Inequality(y, x)``.
 
     Parameters
     ----------
@@ -152,7 +196,6 @@ class Inequality(Constraint):
     """
     def __init__(self, lhs, rhs, constr_id=None) -> None:
         self._expr = lhs - rhs
-        # TODO remove this restriction.
         if self._expr.is_complex():
             raise ValueError("Inequality constraints cannot be complex.")
         super(Inequality, self).__init__([lhs, rhs], constr_id)
@@ -183,6 +226,13 @@ class Inequality(Constraint):
             with scopes.dpp_scope():
                 return self.expr.is_convex()
         return self.expr.is_convex()
+
+    def is_dnlp(self) -> bool:
+        """
+        An Inequality constraint is DNLP if its
+        argument is linearizable convex.
+        """
+        return self.expr.is_linearizable_convex()
 
     def is_dgp(self, dpp: bool = False) -> bool:
         if dpp:
@@ -216,4 +266,11 @@ class Inequality(Constraint):
         """
         if self.expr.value is None:
             return None
-        return np.maximum(self.expr.value, 0)
+        return -np.maximum(self.expr.value, 0)
+
+    @property
+    def dual_residual(self):
+        dv = self.dual_variables[0].value
+        if dv is None:
+            return None
+        return -np.minimum(dv, 0.0)

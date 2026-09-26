@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from typing import Tuple
 
 import numpy as np
 
@@ -40,10 +39,11 @@ class Prod(AxisAtom):
         Whether to drop dimensions after summing.
     """
 
-    def __init__(self, expr, axis=None, keepdims: bool = False) -> None:
+    def __init__(self, expr, axis: None | int | tuple[int, ...] = None,
+                 keepdims: bool = False) -> None:
         super(Prod, self).__init__(expr, axis=axis, keepdims=keepdims)
 
-    def sign_from_args(self) -> Tuple[bool, bool]:
+    def sign_from_args(self) -> tuple[bool, bool]:
         """Returns sign (is positive, is negative) of the expression.
         """
         if self.args[0].is_nonneg():
@@ -70,6 +70,10 @@ class Prod(AxisAtom):
         """
         return True
 
+    def is_atom_smooth(self) -> bool:
+        """Is the atom smooth?"""
+        return True
+
     def is_incr(self, idx) -> bool:
         """Is the composition non-decreasing in argument idx?
         """
@@ -84,9 +88,25 @@ class Prod(AxisAtom):
         """Takes the product of the entries of value.
         """
         if intf.is_sparse(values[0]):
-            result = np.prod(values[0], axis=self.axis)
-            if not self.keepdims and self.axis is not None:
-                result = result.A.flatten()
+            sp_mat = values[0]
+            if self.axis is None:
+                if sp_mat.nnz == sp_mat.shape[0] * sp_mat.shape[1]:
+                    data = sp_mat.data
+                else:
+                    data = np.zeros(1, dtype=sp_mat.dtype)
+                result = np.prod(data)
+            elif self.axis in [0, 1]:
+                # The following snippet is taken from stackoverflow.
+                # https://stackoverflow.com/questions/44320865/
+                # can replace private _getnnz for scipy 1.15+ with count_nonzero
+                mask = sp_mat._getnnz(axis=self.axis) == sp_mat.shape[self.axis]
+                result = np.zeros(sp_mat.shape[1-self.axis], dtype=sp_mat.dtype)
+                data = sp_mat[:, mask] if self.axis == 0 else sp_mat[mask, :]
+                result[mask] = np.prod(data.toarray(), axis=self.axis)
+                if self.keepdims:
+                    result = np.expand_dims(result, self.axis)
+            else:
+                raise UserWarning("cp.prod does not support axis > 1 for sparse matrices.")
         else:
             result = np.prod(values[0], axis=self.axis, keepdims=self.keepdims)
         return result

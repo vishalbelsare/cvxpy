@@ -14,13 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 import numpy as np
+import pytest
 
 import cvxpy as cp
 import cvxpy.settings as s
+from cvxpy.reductions.dqcp2dcp.dqcp2dcp import Dqcp2Dcp
 from cvxpy.reductions.solvers import bisection
 from cvxpy.tests import base_test
 
-SOLVER = cp.ECOS
+SOLVER = cp.CLARABEL
 
 
 class TestDqcp(base_test.BaseTest):
@@ -41,7 +43,7 @@ class TestDqcp(base_test.BaseTest):
         self.assertFalse(problem.is_dcp())
         self.assertFalse(problem.is_dgp())
 
-        red = cp.Dqcp2Dcp(problem)
+        red = Dqcp2Dcp(problem)
         reduced = red.reduce()
         self.assertTrue(reduced.is_dcp())
         self.assertEqual(len(reduced.parameters()), 1)
@@ -69,7 +71,7 @@ class TestDqcp(base_test.BaseTest):
         self.assertFalse(problem.is_dcp())
         self.assertFalse(problem.is_dgp())
 
-        red = cp.Dqcp2Dcp(problem)
+        red = Dqcp2Dcp(problem)
         reduced = red.reduce()
         self.assertTrue(reduced.is_dcp())
         self.assertEqual(len(reduced.parameters()), 1)
@@ -207,6 +209,21 @@ class TestDqcp(base_test.BaseTest):
         self.assertEqual(problem.objective.value, 11.0)
         self.assertGreater(x.value, 11.7)
 
+    def test_ceil_floor_near_integer_tolerance(self) -> None:
+        """Values within solver noise of an integer evaluate to that integer."""
+        x = cp.Variable()
+        for noisy in [3 - 1e-10, 3 + 1e-10]:
+            x.value = noisy
+            self.assertEqual(cp.floor(x).value, 3.0)
+            self.assertEqual(cp.ceil(x).value, 3.0)
+        # Exact integers and clearly-non-integer values are unaffected.
+        x.value = 4.0
+        self.assertEqual(cp.floor(x).value, 4.0)
+        self.assertEqual(cp.ceil(x).value, 4.0)
+        x.value = 2.5
+        self.assertEqual(cp.floor(x).value, 2.0)
+        self.assertEqual(cp.ceil(x).value, 3.0)
+
     def test_basic_multiply_nonneg(self) -> None:
         x, y = cp.Variable(2, nonneg=True)
         expr = x * y
@@ -221,7 +238,7 @@ class TestDqcp(base_test.BaseTest):
         self.assertFalse(problem.is_dcp())
         self.assertFalse(problem.is_dgp())
 
-        problem.solve(SOLVER, qcp=True)
+        problem.solve(cp.SCS, qcp=True)
         self.assertAlmostEqual(problem.objective.value, 72, places=1)
         self.assertAlmostEqual(x.value, 12, places=1)
         self.assertAlmostEqual(y.value, 6, places=1)
@@ -240,10 +257,24 @@ class TestDqcp(base_test.BaseTest):
         self.assertFalse(problem.is_dcp())
         self.assertFalse(problem.is_dgp())
 
-        problem.solve(SOLVER, qcp=True)
+        problem.solve(cp.SCS, qcp=True)
         self.assertAlmostEqual(problem.objective.value, 72, places=1)
         self.assertAlmostEqual(x.value, -12, places=1)
         self.assertAlmostEqual(y.value, -6, places=1)
+
+    def test_multiply_solver_failure_during_bisection(self) -> None:
+        # Regression test: CLARABEL fails (instead of reporting
+        # infeasibility) at query points near the optimum of this badly
+        # scaled problem; bisection used to re-solve the identical failing
+        # subproblem until it raised "Max iters hit during bisection".
+        x = cp.Variable(nonneg=True)
+        y = cp.Variable(nonneg=True)
+        problem = cp.Problem(cp.Maximize(cp.multiply(x, y)), [x + y <= 1e-4])
+        with pytest.warns(RuntimeWarning):
+            problem.solve(solver=cp.CLARABEL, qcp=True)
+        self.assertIn(problem.status, s.SOLUTION_PRESENT)
+        # optimal value is (5e-5)**2 = 2.5e-9; bisection eps is 1e-6
+        self.assertAlmostEqual(problem.value, 2.5e-9, places=6)
 
     def test_basic_multiply_qcvx(self) -> None:
         x = cp.Variable(nonneg=True)
@@ -260,7 +291,7 @@ class TestDqcp(base_test.BaseTest):
         self.assertFalse(problem.is_dcp())
         self.assertFalse(problem.is_dgp())
 
-        problem.solve(SOLVER, qcp=True)
+        problem.solve(cp.SCS, qcp=True)
         self.assertAlmostEqual(problem.objective.value, -42, places=1)
         self.assertAlmostEqual(x.value, 7, places=1)
         self.assertAlmostEqual(y.value, -6, places=1)
@@ -279,7 +310,7 @@ class TestDqcp(base_test.BaseTest):
         self.assertFalse(problem.is_dcp())
         self.assertFalse(problem.is_dgp())
 
-        problem.solve(SOLVER, qcp=True)
+        problem.solve(cp.SCS, qcp=True)
         self.assertAlmostEqual(problem.objective.value, -42, places=1)
         self.assertAlmostEqual(x.value, 7, places=1)
         self.assertAlmostEqual(y.value, -6, places=1)
@@ -292,7 +323,7 @@ class TestDqcp(base_test.BaseTest):
         self.assertFalse(expr.is_quasiconvex())
 
         problem = cp.Problem(cp.Maximize(expr), [x <= 4, y <= 9])
-        problem.solve(SOLVER, qcp=True)
+        problem.solve(cp.SCS, qcp=True)
         self.assertAlmostEqual(problem.objective.value, 6, places=1)
         self.assertAlmostEqual(x.value, 4, places=1)
         self.assertAlmostEqual(y.value, 9, places=1)
@@ -304,7 +335,7 @@ class TestDqcp(base_test.BaseTest):
         self.assertFalse(expr.is_quasiconvex())
 
         problem = cp.Problem(cp.Maximize(expr), [x <= 4, y <= 9])
-        problem.solve(SOLVER, qcp=True)
+        problem.solve(cp.SCS, qcp=True)
         # (2 + 2) * (3 + 4) = 28
         self.assertAlmostEqual(problem.objective.value, 28, places=1)
         self.assertAlmostEqual(x.value, 4, places=1)
@@ -321,7 +352,7 @@ class TestDqcp(base_test.BaseTest):
         problem = cp.Problem(cp.Minimize(expr), [x == 12, y <= 6])
         self.assertTrue(problem.is_dqcp())
 
-        problem.solve(SOLVER, qcp=True)
+        problem.solve(cp.SCS, qcp=True)
         self.assertAlmostEqual(problem.objective.value, 2.0, places=1)
         self.assertAlmostEqual(x.value, 12, places=1)
         self.assertAlmostEqual(y.value, 6, places=1)
@@ -336,7 +367,7 @@ class TestDqcp(base_test.BaseTest):
         problem = cp.Problem(cp.Maximize(expr), [x == 12, y >= -6])
         self.assertTrue(problem.is_dqcp())
 
-        problem.solve(SOLVER, qcp=True)
+        problem.solve(cp.SCS, qcp=True)
         self.assertAlmostEqual(problem.objective.value, -2.0, places=1)
         self.assertAlmostEqual(x.value, 12, places=1)
         self.assertAlmostEqual(y.value, -6, places=1)
@@ -367,7 +398,7 @@ class TestDqcp(base_test.BaseTest):
 
         problem = cp.Problem(cp.Maximize(concave_frac))
         self.assertTrue(problem.is_dqcp())
-        problem.solve(SOLVER, qcp=True)
+        problem.solve(cp.SCS, qcp=True)
         self.assertAlmostEqual(problem.objective.value, 0.428, places=1)
         self.assertAlmostEqual(x.value, 0.5, places=1)
 
@@ -382,6 +413,32 @@ class TestDqcp(base_test.BaseTest):
         problem.solve(SOLVER, qcp=True)
         self.assertEqual(problem.objective.value, 2)
         np.testing.assert_almost_equal(x.value, np.array([2, 1, 0, 0, 0]))
+
+    def test_length_example(self) -> None:
+        """Fix #1760."""
+        n = 10
+        np.random.seed(1)
+        A = np.random.randn(n, n)
+        x_star = np.random.randn(n)
+        b = A @ x_star
+        epsilon = 1e-2
+        x = cp.Variable(n)
+        mse = cp.sum_squares(A @ x - b)/n
+        problem = cp.Problem(cp.Minimize(cp.length(x)), [mse <= epsilon])
+        assert problem.is_dqcp()
+
+        problem.solve(qcp=True)
+        assert np.isclose(problem.value, 8)
+
+    def test_length_monototicity(self) -> None:
+        n = 5
+        x = cp.Variable(n)
+        self.assertTrue(cp.length(cp.abs(x)).is_incr(0))
+        self.assertFalse(cp.length(cp.abs(x)-1).is_incr(0))
+        self.assertTrue(cp.length(cp.abs(x)).is_dqcp())
+        self.assertFalse(cp.length(cp.abs(x)-1).is_dqcp())
+        self.assertTrue(cp.length(-cp.abs(x)).is_decr(0))
+        self.assertFalse(cp.length(-cp.abs(x)+1).is_decr(0))
 
     def test_infeasible(self) -> None:
         x = cp.Variable(2)
@@ -413,14 +470,22 @@ class TestDqcp(base_test.BaseTest):
         cp.sign(variable).value
         self.assertItemsAlmostEqual(value, variable.value)
 
+        # sign is only QCP for univariate input.
+        # See issue #1828
+        x = cp.Variable(2)
+        obj = cp.sum_squares(np.ones(2) - x)
+        constr = [cp.sum(cp.sign(x)) <= 1]
+        prob = cp.Problem(cp.Minimize(obj), constr)
+        assert not prob.is_dqcp()
+
     def test_dist_ratio(self) -> None:
         x = cp.Variable(2)
         a = np.ones(2)
         b = np.zeros(2)
         problem = cp.Problem(cp.Minimize(cp.dist_ratio(x, a, b)), [x <= 0.8])
-        problem.solve(SOLVER, qcp=True)
-        np.testing.assert_almost_equal(problem.objective.value, 0.25)
-        np.testing.assert_almost_equal(x.value, np.array([0.8, 0.8]))
+        problem.solve(cp.CLARABEL, qcp=True)
+        np.testing.assert_almost_equal(problem.objective.value, 0.25, decimal=3)
+        np.testing.assert_almost_equal(x.value, np.array([0.8, 0.8]), decimal=3)
 
     def test_infeasible_exp_constr(self) -> None:
         x = cp.Variable()
@@ -477,6 +542,23 @@ class TestDqcp(base_test.BaseTest):
         self.assertTrue(problem.is_dqcp())
         # smoke test
         problem.solve(cp.SCS, qcp=True)
+
+    def test_condition_number(self) -> None:
+        A = cp.Variable((2, 2), PSD=True)
+        con_num = cp.condition_number(A)
+        constr = [
+            A[0][0] == 2.0,
+            A[1][1] == 3.0,
+            A[0][1] <= 2, A[0][1] >= 1,
+            A[1][0] <= 2, A[1][0] >= 1,
+        ]
+        prob = cp.Problem(cp.Minimize(con_num), constr)
+        self.assertTrue(prob.is_dqcp())
+        # smoke test
+        prob.solve(cp.SCS, qcp=True)
+        ans = np.asarray([[2.0, 1.0],
+                          [1.0, 3.0]])
+        self.assertItemsAlmostEqual(A.value, ans, places=1)
 
     def test_card_ls(self) -> None:
         n = 10
@@ -560,7 +642,7 @@ class TestDqcp(base_test.BaseTest):
         objective_fn = -cp.sqrt(x) / y
         problem = cp.Problem(cp.Minimize(objective_fn), [cp.exp(x) <= y])
         # smoke test
-        problem.solve(SOLVER, qcp=True)
+        problem.solve(cp.SCS, qcp=True)
 
     def test_curvature(self) -> None:
         x = cp.Variable(3)
@@ -601,8 +683,8 @@ class TestDqcp(base_test.BaseTest):
         obj = cp.max((1 - 2*cp.sqrt(x) + x) / x)
         problem = cp.Problem(cp.Minimize(obj), [x[0] <= 0.5, x[1] <= 0.9])
         self.assertTrue(problem.is_dqcp())
-        problem.solve(SOLVER, qcp=True)
-        self.assertAlmostEqual(problem.objective.value, 0.1715, places=3)
+        problem.solve(cp.SCS, qcp=True)
+        self.assertAlmostEqual(problem.objective.value, 0.1715, places=1)
 
     def test_min(self) -> None:
         x = cp.Variable(2)
@@ -642,6 +724,115 @@ class TestDqcp(base_test.BaseTest):
         problem.solve(SOLVER, qcp=True)
         self.assertAlmostEqual(problem.value, 0, places=3)
 
-        problem = cp.Problem(cp.Minimize(cp.cumsum(1/x)))
+        problem = cp.Problem(cp.Minimize(cp.cumsum(1/x, axis=None)))
         problem.solve(SOLVER, qcp=True)
         self.assertAlmostEqual(problem.value, 0, places=3)
+
+    def test_parameter_bug(self) -> None:
+        """Test bug with parameters arising from interaction of
+        DQCP and DPP.
+
+        https://github.com/cvxpy/cvxpy/issues/2386
+        """
+        x = cp.Variable()
+
+        objective = cp.Minimize(cp.sqrt(x))
+
+        constraints = [x <= 2, x >= 1]
+
+        problem = cp.Problem(objective, constraints)
+
+        problem.solve(qcp=True, solver=cp.SCS)
+
+        self.assertAlmostEqual(x.value, objective.value, places=3)
+        self.assertAlmostEqual(x.value, 1, places=3)
+
+    def test_psd_constraint_bug(self) -> None:
+        """Test bug with DQCP and PSD constraints.
+
+        https://github.com/cvxpy/cvxpy/issues/2373
+        """
+        A = cp.Variable((2,2),symmetric=True)
+
+        x = A[0,1]
+        y = A[1,1]
+
+        # assertions and constraints
+        x = cp.atoms.affine.wraps.nonneg_wrap(x)
+        y = cp.atoms.affine.wraps.nonneg_wrap(y)
+        constraints = [A >> 0]
+
+        # function
+        f = x*y
+
+        # create the problem
+        problem = cp.Problem(cp.Maximize(f), constraints)
+
+        # solve
+        assert problem.is_dqcp()
+        with pytest.raises(
+            cp.SolverError,
+            match="(Max iters hit during bisection|"
+                  "Unable to find suitable interval for bisection|"
+                  "Solver failed with status solver_error)"
+        ):
+            problem.solve(qcp=True, solver=cp.SCS, max_iters=1)
+
+    def test_dist_ratio_dqcp(self) -> None:
+        """dist_ratio DQCP problem should give correct result."""
+        x = cp.Variable(2)
+        a = np.array([0.0, 0.0])
+        b = np.array([3.0, 0.0])
+        atom = cp.dist_ratio(x, a, b)
+        prob = cp.Problem(cp.Minimize(atom), [cp.norm(x) <= 2])
+        prob.solve(solver=SOLVER, qcp=True)
+        self.assertEqual(prob.status, s.OPTIMAL)
+        self.assertAlmostEqual(prob.value, 0.0, places=3)
+
+    def test_dqcp_power_infeasible(self) -> None:
+        """DQCP with power(ceil(x), 2) <= -5 should be infeasible."""
+        x = cp.Variable(nonneg=True)
+        problem = cp.Problem(cp.Minimize(0), [cp.power(cp.ceil(x), 2) <= -5])
+        problem.solve(SOLVER, qcp=True)
+        self.assertEqual(problem.status, s.INFEASIBLE)
+
+    def test_bisection_low_zero(self) -> None:
+        """Bisection with low=0 should not infinite-loop."""
+        x = cp.Variable()
+        problem = cp.Problem(cp.Minimize(cp.ceil(x)), [x >= 15, x <= 17])
+        problem.solve(SOLVER, qcp=True, low=0, high=100)
+        self.assertEqual(problem.status, s.OPTIMAL)
+        self.assertAlmostEqual(problem.value, 15.0, places=3)
+
+    def test_length_verbose(self) -> None:
+        """Regression test: verbose=True should not crash with length atom.
+
+        Before the fix, _lower_problem() evaluated lazy constraints before
+        t.value was assigned, causing TypeError: '<' not supported between
+        instances of 'NoneType' and 'int'.
+        """
+        x = cp.Variable(5)
+        problem = cp.Problem(cp.Minimize(cp.length(x)),
+                             [x[0] == 2.0, x[1] == 1.0])
+        problem.solve(SOLVER, qcp=True, verbose=True)
+        self.assertEqual(problem.status, s.OPTIMAL)
+        self.assertEqual(problem.objective.value, 2)
+
+    def test_sign_verbose(self) -> None:
+        """Regression test: verbose=True should not crash with sign atom."""
+        x = cp.Variable()
+        problem = cp.Problem(cp.Minimize(cp.sign(x)), [-2 <= x, x <= -0.5])
+        problem.solve(SOLVER, qcp=True, verbose=True)
+        self.assertEqual(problem.status, s.OPTIMAL)
+        self.assertEqual(problem.objective.value, -1)
+
+    def test_dist_ratio_verbose(self) -> None:
+        """Regression test: verbose=True should not crash with dist_ratio."""
+        x = cp.Variable(2)
+        a = np.array([0.0, 0.0])
+        b = np.array([3.0, 0.0])
+        problem = cp.Problem(cp.Minimize(cp.dist_ratio(x, a, b)),
+                             [cp.norm(x) <= 2])
+        problem.solve(solver=SOLVER, qcp=True, verbose=True)
+        self.assertEqual(problem.status, s.OPTIMAL)
+        self.assertAlmostEqual(problem.value, 0.0, places=3)

@@ -3,16 +3,28 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-Welcome to CVXPY 1.1
-====================
+Welcome to CVXPY 1.10
+=====================
 
 .. meta::
    :description: An open source Python-embedded modeling language for convex optimization problems.
                  Express your problem in a natural way that follows the math.
    :keywords: convex optimization, open source, software,
 
+.. raw:: html
+
+      <script type="application/ld+json">
+      {
+         "@context" : "https://schema.org",
+         "@type" : "WebSite",
+         "name" : "CVXPY",
+         "url" : "https://www.cvxpy.org/"
+      }
+      </script>
+
 **Convex optimization, for everyone.**
 
+*Help us benchmark CVXPY solvers! Contribute problems and results to the* `Solver Benchmarks <resources/solver_benchmarks/>`_ *project.*
 *We are building a CVXPY community* `on Discord <https://discord.gg/4urRQeGBCr>`_. *Join the conversation!*
 
 CVXPY is an open source Python-embedded modeling language for convex
@@ -49,16 +61,20 @@ For example, the following code solves a least-squares problem with box constrai
     print(constraints[0].dual_value)
 
 This short script is a basic example of what CVXPY can do. In addition
-to convex programming, CVXPY also supports a generalization of geometric
-programming, mixed-integer convex programs, and quasiconvex programs.
+to convex programming, CVXPY also supports :doc:`parametrized programming </tutorial/dpp/index>`,
+:doc:`geometric programming </tutorial/dgp/index>`, :ref:`mixed-integer convex programs <mip>`,
+:doc:`quasiconvex programming </tutorial/dqcp/index>`,
+and :doc:`nonlinear programming </tutorial/dnlp/index>`.
 
 For a guided tour of CVXPY, check out the :doc:`tutorial
 </tutorial/index>`. For applications to machine learning, control, finance, and
-more, browse the :doc:`library of examples </examples/index>`. For
-background on convex optimization, see the book `Convex Optimization
-<http://www.stanford.edu/~boyd/cvxbook/>`_ by Boyd and Vandenberghe.
+more, browse the :doc:`library of examples </examples/index>`.
+For applications that involve nonlinear programming, visit the
+`library of DNLP examples <https://github.com/cvxgrp/dnlp-examples/>`_.
+For background on convex optimization, see the book `Convex Optimization
+<https://www.stanford.edu/~boyd/cvxbook/>`_ by Boyd and Vandenberghe.
 
-CVXPY relies on the open source solvers `OSQP`_, `SCS`_, and `ECOS`_.
+CVXPY relies on the open source solvers `Clarabel`_, `OSQP`_, `SCS`_, `HIGHS`_.
 Additional solvers are supported, but must be installed separately.
 
 **Community.**
@@ -79,27 +95,35 @@ researchers and engineers.
 
 CVXPY is developed and maintained by
 `Steven Diamond <https://stevendiamond.me/>`_,
-`Akshay Agrawal <https://akshayagrawal.com>`_, and
-`Riley Murray <https://rileyjmurray.wordpress.com/>`_, with many others contributing
-significantly. A non-exhaustive list of people who have shaped CVXPY over the
-years includes Stephen Boyd, Eric Chu, Robin Verschueren, Bartolomeo Stellato,
-Jaehyun Park, Enzo Busseti, AJ Friend, Judson Wilson, and Chris
-Dembia.
+`Riley Murray <https://rileyjmurray.wordpress.com/>`_,
+`Philipp Schiele <https://www.philippschiele.com/>`_,
+`Parth Nobel <https://ptnobel.github.io/>`_, and
+`William Zhang <https://zijie.ca/>`_.
+CVXPY's emeritus maintainers are
+`Bartolomeo Stellato <https://stellato.io/>`_ and `Akshay Agrawal <https://akshayagrawal.com>`_.
+Many others have contributed significantly.
+A non-exhaustive list of people who have shaped CVXPY over the
+years includes Stephen Boyd, Eric Chu, Robin Verschueren,
+Jaehyun Park, Enzo Busseti, AJ Friend, Judson Wilson, Chris Dembia, and Daniel Cederberg.
 
 We appreciate all contributions. To get involved, see our :doc:`contributing
 guide </contributing/index>` and join us `on Discord <https://discord.gg/4urRQeGBCr>`_.
 
 **News.**
 
-* CVXPY v1.1.0 has been released. This version makes
-  repeatedly canonicalizing :ref:`parametrized problems <dpp>` much faster than before,
-  allows :ref:`differentiating the map <derivatives>` from parameters to optimal solutions, and introduces
-  some new atoms. See :ref:`updates` for more information.
+CVXPY 1.9 introduces *Disciplined Nonlinear Programming* (DNLP), a grammar
+for specifying nonlinear programs (NLP) which extends CVXPY beyond convex optimization.
+CVXPY currently supports four NLP solvers:
+`IPOPT <https://github.com/coin-or/Ipopt>`_,
+`KNITRO <https://www.artelys.com/solvers/knitro/>`_,
+`UNO <https://github.com/cvanaret/Uno>`_, and
+`COPT <https://www.shanshu.ai/copt>`_.
+For a complete list of changes, see the :doc:`changelog </updates/index>`.
 
-
+.. _Clarabel: https://github.com/oxfordcontrol/Clarabel.rs
 .. _OSQP: https://osqp.org/
-.. _ECOS: http://github.com/ifa-ethz/ecos
 .. _SCS: http://github.com/cvxgrp/scs
+.. _HIGHS: https://github.com/ERGO-Code/HiGHS
 
 .. toctree::
    :hidden:
@@ -107,10 +131,19 @@ guide </contributing/index>` and join us `on Discord <https://discord.gg/4urRQeG
    install/index
 
 .. toctree::
-    :maxdepth: 3
     :hidden:
 
-    tutorial/index
+    User Guide <tutorial/index>
+
+.. toctree::
+   :hidden:
+
+   functions/index
+
+.. toctree::
+   :hidden:
+
+   API Documentation <api_reference/cvxpy>
 
 .. toctree::
    :hidden:
@@ -120,7 +153,12 @@ guide </contributing/index>` and join us `on Discord <https://discord.gg/4urRQeG
 .. toctree::
    :hidden:
 
-   API Documentation <api_reference/cvxpy>
+   contributing/index
+
+.. toctree::
+   :hidden:
+
+   Changelog <updates/index>
 
 .. toctree::
    :maxdepth: 1
@@ -131,29 +169,9 @@ guide </contributing/index>` and join us `on Discord <https://discord.gg/4urRQeG
 .. toctree::
    :hidden:
 
-   citing/index
+   resources/index
 
 .. toctree::
    :hidden:
 
-   contributing/index
-
-.. toctree::
-   :hidden:
-
-   related_projects/index
-
-.. toctree::
-   :hidden:
-
-   updates/index
-
-.. toctree::
-   :hidden:
-
-   short_course/index
-
-.. toctree::
-   :hidden:
-
-   license/index
+   workshop/index
